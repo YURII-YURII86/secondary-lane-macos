@@ -1,0 +1,14 @@
+[Unit]
+Description=Universal Flex Agent
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/universal-flex-agent
+EnvironmentFile=/opt/universal-flex-agent/.env
+ExecStart=/opt/universal-flex-agent/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8787
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

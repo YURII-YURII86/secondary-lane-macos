@@ -1,0 +1,4 @@
+interface:
+  display_name: "Second Lane Mac Autopilot"
+  short_description: "Авторазвёртывание Second Lane на macOS"
+  default_prompt: "Use $gpts-mac-autopilot to do as much of the macOS Second Lane setup as possible by yourself: verify Python 3.13 and ngrok, pause only for real human-only login or registration steps, fill .env, launch the panel, verify the tunnel, then help finish the GPT with Actions and a working test call."

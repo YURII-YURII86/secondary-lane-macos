@@ -1,0 +1,851 @@
+# Second Lane
+# Copyright (c) 2026 Yurii Slepnev
+# Licensed under the Apache License, Version 2.0.
+# Official: https://t.me/yurii_yurii86 | https://youtube.com/@yurii_yurii86 | https://instagram.com/yurii_yurii86
+# /// CONTEXT_BLOCK
+# ID: ufa_local_control_panel
+# TYPE: interface
+# PURPOSE: Local operator panel for starting, stopping, and observing the daemon and public tunnel.
+# DEPENDS_ON: [.env, openapi.gpts.yaml, .venv/bin/uvicorn]
+# USED_BY: [Запустить Second Lane.command]
+# STATE: active
+# /// ---
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import signal
+import ssl
+import subprocess
+import threading
+import time
+import urllib.error
+import urllib.request
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from tkinter import BOTH, END, LEFT, Button, Frame, Label, StringVar, Text, Tk
+
+try:
+    import certifi
+except ImportError:  # pragma: no cover - optional dependency at runtime
+    certifi = None
+
+
+PROJECT_DIR = Path(__file__).resolve().parent
+ENV_FILE = PROJECT_DIR / ".env"
+OPENAPI_FILES = [
+    PROJECT_DIR / "openapi.gpts.yaml",
+]
+DEFAULT_VENV_UVICORN = PROJECT_DIR / ".venv" / "bin" / "uvicorn"
+PYTHON = "python3.13"
+LOCAL_URL = "http://127.0.0.1:8787"
+
+# --- Tunnel defaults ---
+DEFAULT_NGROK_DOMAIN = ""
+TUNNEL_HEALTH_ATTEMPTS = 4
+TUNNEL_HEALTH_DELAY_SEC = 2.0
+TUNNEL_HEALTH_TIMEOUT_SEC = 6
+TUNNEL_RESTART_COOLDOWN_SEC = 5
+TUNNEL_MONITOR_INTERVAL_MS = 10_000
+NGROK_BLOCKED_IP_ERROR = "ERR_NGROK_9040"
+PUBLIC_CHECK_INTERVAL_SEC = 25
+PUBLIC_CHECK_MAX_FAILURES = 2
+RECOVERY_BACKOFF_STEPS_SEC = [3, 10, 30]
+
+
+@dataclass
+class TunnelFailure:
+    code: str
+    summary: str
+    recoverable: bool
+
+
+@dataclass
+class LocalDaemonProcess:
+    pid: int
+    cwd: Path | None
+    command: str
+
+
+class ControlPanel:
+    def __init__(self) -> None:
+        self.root = Tk()
+        self.root.title("Second Lane Control")
+        self.root.geometry("860x560")
+
+        self.agent_proc: subprocess.Popen | None = None
+        self.tunnel_proc: subprocess.Popen | None = None
+        self._using_external_daemon = False
+        self.tunnel_url = StringVar(value="Туннель: не запущен")
+        self.agent_status = StringVar(value="Демон: не запущен")
+        self.last_url: str | None = None
+        self._tunnel_restart_count = 0
+        self._tunnel_max_restarts = 5
+        self._tunnel_blocked_reason: str | None = None
+        self._last_tunnel_failure: TunnelFailure | None = None
+        self._recovering_tunnel = False
+        self._public_check_running = False
+        self._last_public_check_ts = 0.0
+        self._public_check_failures = 0
+
+        self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self._poll_status()
+
+    # --- UI ---
+
+    def _build_ui(self) -> None:
+        Label(self.root, text="Second Lane Control", font=("Helvetica", 22, "bold")).pack(pady=(16, 8))
+        Label(self.root, text="by Yurii Slepnev", font=("Helvetica", 11)).pack(pady=(0, 4))
+        Label(self.root, textvariable=self.agent_status, font=("Helvetica", 14)).pack(pady=4)
+        Label(self.root, textvariable=self.tunnel_url, font=("Helvetica", 14), wraplength=780).pack(pady=4)
+
+        row_top = Frame(self.root)
+        row_top.pack(pady=(14, 8))
+        row_bottom = Frame(self.root)
+        row_bottom.pack(pady=(0, 14))
+
+        Button(row_top, text="Запустить", width=18, height=2, command=self.start_all).pack(side=LEFT, padx=8)
+        Button(row_top, text="Перезапустить демон", width=18, height=2, command=self.restart_daemon).pack(side=LEFT, padx=8)
+        Button(row_top, text="Выключить", width=18, height=2, command=self.stop_all).pack(side=LEFT, padx=8)
+
+        Button(row_bottom, text="Скопировать URL", width=18, height=2, command=self.copy_url).pack(side=LEFT, padx=8)
+        Button(row_bottom, text="Проверить", width=18, height=2, command=self.check_now).pack(side=LEFT, padx=8)
+        Button(row_bottom, text="Открыть .env", width=18, height=2, command=self.open_env_file).pack(side=LEFT, padx=8)
+
+        self.log = Text(self.root, height=20, wrap="word")
+        self.log.pack(fill=BOTH, expand=True, padx=16, pady=(8, 16))
+        self.write_log(
+            "Second Lane by Yurii Slepnev\n"
+            "Telegram: https://t.me/yurii_yurii86\n"
+            "YouTube: https://youtube.com/@yurii_yurii86\n"
+            "Instagram: https://instagram.com/yurii_yurii86\n"
+            "Licensed under Apache-2.0\n\n"
+            "Открой это окно и нажми «Запустить». Потом вставь compact-схему openapi.gpts.yaml в GPT Actions.\n"
+        )
+
+    def write_log(self, text: str) -> None:
+        self.log.insert(END, text)
+        self.log.see(END)
+
+    # --- Env / config ---
+
+    def load_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        if ENV_FILE.exists():
+            for line in ENV_FILE.read_text("utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                env[key.strip()] = value.strip()
+        env["ENABLED_PROVIDER_MANIFESTS"] = str(PROJECT_DIR / "app" / "providers")
+        env["STATE_DB_PATH"] = str(PROJECT_DIR / "data" / "agent.db")
+        default_workspace = f"{Path.home() / 'Documents'}:/workspace:/projects"
+        env.setdefault("WORKSPACE_ROOTS", default_workspace)
+        return env
+
+    def agent_token(self) -> str:
+        return self.load_env().get("AGENT_TOKEN", "")
+
+    def agent_token_is_safe(self) -> bool:
+        token = self.agent_token().strip()
+        weak_tokens = {"", "change-me", "changeme", "default", "token"}
+        return token not in weak_tokens
+
+    def explain_unsafe_token(self) -> None:
+        self.write_log(
+            "Не могу безопасно запустить агента: токен защиты не заполнен или выглядит как временная заглушка.\n\n"
+            "Что это значит простыми словами:\n"
+            "- этот токен работает как секретный ключ для доступа к агенту через интернет;\n"
+            "- если оставить пустое значение или что-то вроде change-me, защиту легко угадать;\n"
+            "- поэтому запуск сейчас специально остановлен.\n\n"
+            "Что сделать:\n"
+            f"1. Открой файл {ENV_FILE}\n"
+            "2. Найди строку AGENT_TOKEN=...\n"
+            "3. Вставь после = длинный случайный набор символов\n"
+            "4. Сохрани файл\n"
+            "5. Снова нажми «Запустить»\n\n"
+            "Пример хорошего токена:\n"
+            "AGENT_TOKEN=long-random-secret-token-please-use-your-own-value\n\n"
+            "Важно:\n"
+            "- не используй change-me, default, token;\n"
+            "- не публикуй этот токен в скриншотах и сообщениях.\n"
+        )
+
+    def ngrok_domain(self) -> str:
+        return self.load_env().get("NGROK_DOMAIN", DEFAULT_NGROK_DOMAIN).strip()
+
+    def _classify_ngrok_output(self, text: str) -> TunnelFailure:
+        lowered = text.lower()
+        if NGROK_BLOCKED_IP_ERROR.lower() in lowered:
+            return TunnelFailure(
+                code="ip_blocked",
+                summary="ngrok заблокировал запуск с текущего IP",
+                recoverable=False,
+            )
+        if "authentication failed" in lowered or "invalid authtoken" in lowered:
+            return TunnelFailure(
+                code="auth_failed",
+                summary="ngrok отклонил токен или доступ аккаунта",
+                recoverable=False,
+            )
+        if "reserved domain" in lowered or "domain" in lowered and ("invalid" in lowered or "not found" in lowered):
+            return TunnelFailure(
+                code="domain_invalid",
+                summary="ngrok не принял указанный домен",
+                recoverable=False,
+            )
+        if "address already in use" in lowered:
+            return TunnelFailure(
+                code="port_busy",
+                summary="порт 8787 уже занят",
+                recoverable=True,
+            )
+        if "timeout" in lowered or "eof" in lowered or "failed to reconnect session" in lowered:
+            return TunnelFailure(
+                code="network_temporary",
+                summary="временная проблема сети или сессии ngrok",
+                recoverable=True,
+            )
+        return TunnelFailure(
+            code="process_crashed",
+            summary="ngrok завершился до готовности туннеля",
+            recoverable=True,
+        )
+
+    def _describe_tunnel_failure(self, failure: TunnelFailure) -> str:
+        if failure.code == "ip_blocked":
+            return (
+                "ngrok не пустил этот IP. "
+                "Это внешняя блокировка со стороны ngrok, сервис сам её не снимет."
+            )
+        if failure.code == "auth_failed":
+            return "ngrok не принял токен или права аккаунта."
+        if failure.code == "domain_invalid":
+            return "ngrok не смог использовать домен из .env."
+        if failure.code == "port_busy":
+            return "локальный порт 8787 занят другим процессом."
+        if failure.code == "network_temporary":
+            return "временный сетевой сбой при подключении к ngrok."
+        return failure.summary
+
+    def _preflight_tunnel_check(self) -> tuple[bool, str]:
+        if not shutil.which("ngrok"):
+            return False, "ngrok не найден. Установи: brew install ngrok"
+        domain = self.ngrok_domain().strip()
+        if not domain:
+            return False, "в .env не задан NGROK_DOMAIN"
+        try:
+            result = subprocess.run(
+                ["ngrok", "config", "check"],
+                cwd=PROJECT_DIR,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=10,
+            )
+        except Exception as exc:
+            return False, f"не смог проверить конфиг ngrok: {exc}"
+        if result.returncode != 0:
+            output = (result.stdout or "").strip()
+            return False, f"конфиг ngrok невалиден: {output or 'неизвестная ошибка'}"
+        if not self._local_daemon_ready():
+            return False, "локальный демон не отвечает на /health"
+        return True, "OK"
+
+    # --- Python env ---
+
+    def uvicorn_bin(self) -> Path:
+        return DEFAULT_VENV_UVICORN
+
+    def ensure_uvicorn(self) -> bool:
+        if self.uvicorn_bin().exists():
+            return True
+        if not shutil.which(PYTHON):
+            self.write_log(
+                "Не найден python3.13. Локальный запуск и pytest в этом проекте сейчас подтверждены именно на Python 3.13; "
+                "Python 3.14 для этого pinned stack не считается поддержанным.\n"
+            )
+            return False
+        self.write_log("Не нашёл готовый uvicorn. Создаю окружение и ставлю зависимости через python3.13...\n")
+        try:
+            uvicorn_bin = self.uvicorn_bin()
+            subprocess.run([PYTHON, "-m", "venv", str(uvicorn_bin.parent.parent)], cwd=PROJECT_DIR, check=True)
+            subprocess.run(
+                [str(uvicorn_bin.parent / "pip"), "install", "-r", str(PROJECT_DIR / "requirements.txt")],
+                cwd=PROJECT_DIR,
+                check=True,
+            )
+            return True
+        except Exception as exc:
+            self.write_log(f"Не смог подготовить Python-окружение через {PYTHON}: {exc}\n")
+            return False
+
+    # --- Start / stop ---
+
+    def start_all(self) -> None:
+        self._tunnel_restart_count = 0
+        self._last_tunnel_failure = None
+        threading.Thread(target=self._start_all_worker, daemon=True).start()
+
+    def restart_daemon(self) -> None:
+        self._tunnel_restart_count = 0
+        self._last_tunnel_failure = None
+        threading.Thread(target=self._restart_daemon_worker, daemon=True).start()
+
+    def _local_daemon_ready(self) -> bool:
+        ok, _ = self._url_ok(f"{LOCAL_URL}/health")
+        return ok
+
+    def _stream_process(self, proc: subprocess.Popen, label: str) -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            short = line.rstrip()
+            if short:
+                self.write_log(f"[{label}] {short}\n")
+        exit_code = proc.poll()
+        if exit_code not in (None, 0):
+            self.write_log(f"[{label}] процесс завершился с кодом {exit_code}\n")
+
+    def _find_listener_pid(self, port: int) -> int | None:
+        try:
+            result = subprocess.run(
+                ["lsof", "-tiTCP:%s" % port, "-sTCP:LISTEN"],
+                cwd=PROJECT_DIR,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=5,
+            )
+        except Exception:
+            return None
+        raw = (result.stdout or "").strip().splitlines()
+        if not raw:
+            return None
+        try:
+            return int(raw[0].strip())
+        except ValueError:
+            return None
+
+    def _describe_local_daemon_process(self) -> LocalDaemonProcess | None:
+        pid = self._find_listener_pid(8787)
+        if pid is None:
+            return None
+        cwd: Path | None = None
+        command = ""
+        try:
+            cwd_result = subprocess.run(
+                ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                cwd=PROJECT_DIR,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=5,
+            )
+            for line in (cwd_result.stdout or "").splitlines():
+                if line.startswith("n"):
+                    cwd = Path(line[1:]).resolve()
+                    break
+        except Exception:
+            cwd = None
+        try:
+            cmd_result = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                cwd=PROJECT_DIR,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=5,
+            )
+            command = (cmd_result.stdout or "").strip()
+        except Exception:
+            command = ""
+        return LocalDaemonProcess(pid=pid, cwd=cwd, command=command)
+
+    def _current_project_owns_port_8787(self) -> bool:
+        info = self._describe_local_daemon_process()
+        if info is None or info.cwd is None:
+            return False
+        return info.cwd == PROJECT_DIR
+
+    def _wait_for_port_8787_to_clear(self, attempts: int = 10, delay_sec: float = 0.5) -> bool:
+        for _ in range(attempts):
+            time.sleep(delay_sec)
+            if self._find_listener_pid(8787) is None:
+                return True
+        return self._find_listener_pid(8787) is None
+
+    def _stop_foreign_daemon_on_8787(self) -> bool:
+        info = self._describe_local_daemon_process()
+        if info is None:
+            return False
+        if info.cwd == PROJECT_DIR:
+            return False
+        self.write_log(
+            "На порту 8787 найден чужой демон от другого проекта.\n"
+            f"PID: {info.pid}\n"
+            f"CWD: {info.cwd or 'не удалось определить'}\n"
+            "Останавливаю его, чтобы поднять текущий проект.\n"
+        )
+        try:
+            os.kill(info.pid, signal.SIGINT)
+        except ProcessLookupError:
+            return True
+        except Exception as exc:
+            self.write_log(f"Не смог остановить чужой демон автоматически: {exc}\n")
+            return False
+        if self._wait_for_port_8787_to_clear():
+            return True
+        try:
+            os.kill(info.pid, signal.SIGTERM)
+        except Exception:
+            pass
+        time.sleep(1.0)
+        return self._find_listener_pid(8787) is None
+
+    def _stop_current_project_daemon_on_8787(self) -> bool:
+        info = self._describe_local_daemon_process()
+        if info is None:
+            self.write_log("На порту 8787 нет живого демона текущего проекта.\n")
+            return True
+        if info.cwd != PROJECT_DIR:
+            self.write_log(
+                "На порту 8787 сейчас не текущий проект, а другой процесс.\n"
+                "Для жёсткого рестарта этого проекта сначала освобожу порт обычным сценарием запуска.\n"
+            )
+            return self._stop_foreign_daemon_on_8787()
+        self.write_log(
+            "Перезапускаю текущий демон проекта на порту 8787.\n"
+            f"PID: {info.pid}\n"
+        )
+        try:
+            os.kill(info.pid, signal.SIGINT)
+        except ProcessLookupError:
+            return True
+        except Exception as exc:
+            self.write_log(f"Не смог остановить текущий демон автоматически: {exc}\n")
+            return False
+        if self._wait_for_port_8787_to_clear():
+            return True
+        try:
+            os.kill(info.pid, signal.SIGTERM)
+        except Exception:
+            pass
+        time.sleep(1.0)
+        return self._find_listener_pid(8787) is None
+
+    def _restart_daemon_worker(self) -> None:
+        if not self.agent_token_is_safe():
+            self.explain_unsafe_token()
+            return
+        self._tunnel_restart_count = self._tunnel_max_restarts
+        self._stop_process(self.tunnel_proc, "туннель")
+        self.tunnel_proc = None
+        self.last_url = None
+        self._tunnel_blocked_reason = None
+        self._last_tunnel_failure = None
+        self._recovering_tunnel = False
+        self._public_check_failures = 0
+        self.tunnel_url.set("Туннель: не запущен")
+        if self.agent_proc is not None and self.agent_proc.poll() is None:
+            self._stop_process(self.agent_proc, "демон")
+            self.agent_proc = None
+        if not self._stop_current_project_daemon_on_8787():
+            self.write_log("Не смог освободить порт 8787 для жёсткого рестарта демона.\n")
+            return
+        self._using_external_daemon = False
+        self.agent_status.set("Демон: перезапуск...")
+        self.write_log("Поднимаю новый процесс демона для текущего проекта...\n")
+        self._tunnel_restart_count = 0
+        self._last_tunnel_failure = None
+        self._start_all_worker()
+
+    def _start_all_worker(self) -> None:
+        # --- Daemon ---
+        if self.agent_proc and self.agent_proc.poll() is None:
+            self.write_log("Демон уже запущен.\n")
+        elif not self.agent_token_is_safe():
+            self.explain_unsafe_token()
+            return
+        elif self._local_daemon_ready() and not self._current_project_owns_port_8787():
+            if not self._stop_foreign_daemon_on_8787():
+                self.write_log(
+                    "Не смог освободить порт 8787 от старого проекта.\n"
+                    "Закрой старый демон вручную и нажми «Запустить» ещё раз.\n"
+                )
+                return
+        elif self._local_daemon_ready():
+            self._using_external_daemon = True
+            self.write_log("На 127.0.0.1:8787 уже отвечает живой демон. Использую его и не запускаю второй экземпляр.\n")
+        else:
+            if not self.ensure_uvicorn():
+                return
+            env = self.load_env()
+            self._using_external_daemon = False
+            self.write_log("Запускаю демона на http://127.0.0.1:8787 ...\n")
+            self.agent_proc = subprocess.Popen(
+                [str(self.uvicorn_bin()), "app.main:app", "--host", "127.0.0.1", "--port", "8787"],
+                cwd=PROJECT_DIR,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            threading.Thread(target=self._stream_process, args=(self.agent_proc, "agent"), daemon=True).start()
+            time.sleep(1.5)
+            if self.agent_proc.poll() is not None and self._local_daemon_ready():
+                self.agent_proc = None
+                self._using_external_daemon = True
+                self.write_log("Новый процесс демона не закрепился, но локальный health уже отвечает. Продолжаю с существующим демоном.\n")
+
+        # --- Tunnel ---
+        self._start_tunnel()
+
+    def _start_tunnel(self) -> None:
+        if self.tunnel_proc and self.tunnel_proc.poll() is None:
+            self.write_log("Туннель уже запущен.\n")
+            return
+
+        ok, detail = self._preflight_tunnel_check()
+        if not ok:
+            self.write_log(f"Не запускаю туннель: {detail}\n")
+            return
+
+        domain = self.ngrok_domain()
+        public_url = f"https://{domain}"
+        self._tunnel_blocked_reason = None
+        self._last_tunnel_failure = None
+        self.write_log(f"Запускаю ngrok туннель → {public_url} ...\n")
+
+        self.tunnel_proc = subprocess.Popen(
+            ["ngrok", "http", "8787", f"--url={domain}", "--log=stdout", "--log-format=logfmt"],
+            cwd=PROJECT_DIR,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        threading.Thread(target=self._stream_ngrok, args=(self.tunnel_proc,), daemon=True).start()
+
+    def _stream_ngrok(self, proc: subprocess.Popen) -> None:
+        assert proc.stdout is not None
+        tunnel_ready = False
+        captured_lines: list[str] = []
+        for line in proc.stdout:
+            captured_lines.append(line)
+            if len(captured_lines) > 40:
+                captured_lines.pop(0)
+            # Show important lines in log, skip noisy ones
+            if any(k in line for k in ("msg=", "err=", "lvl=warn", "lvl=err")):
+                short = line.strip()
+                if len(short) > 200:
+                    short = short[:200] + "..."
+                self.write_log(f"[ngrok] {short}\n")
+
+            if NGROK_BLOCKED_IP_ERROR in line:
+                self._last_tunnel_failure = self._classify_ngrok_output(line)
+                self._tunnel_blocked_reason = self._describe_tunnel_failure(self._last_tunnel_failure)
+                self.tunnel_url.set("Туннель: ngrok заблокировал IP")
+                self.write_log(
+                    "ngrok не пустил агент с текущего IP (ERR_NGROK_9040).\n"
+                    "Простыми словами: токен и проект в порядке, но сам сервис ngrok "
+                    "не разрешает подключение из этой сети/IP.\n"
+                    "Что поможет: другая сеть, другой внешний IP, VPN/VPS вне заблокированного диапазона.\n"
+                )
+
+            # Detect tunnel is up
+            if "started tunnel" in line or "url=https://" in line:
+                domain = self.ngrok_domain()
+                self.last_url = f"https://{domain}"
+                self.tunnel_url.set(f"Туннель: {self.last_url}")
+                self.update_openapi_url(self.last_url)
+                self.write_log(f"Туннель активен: {self.last_url}\n")
+                self.write_log("URL вставлен в openapi.gpts.yaml\n")
+                tunnel_ready = True
+                threading.Thread(target=self._validate_tunnel_after_start, daemon=True).start()
+
+        # Process exited — tunnel is dead
+        exit_code = proc.poll()
+        if self._tunnel_blocked_reason:
+            self.last_url = None
+            return
+        if not tunnel_ready:
+            failure_text = "".join(captured_lines)
+            self._last_tunnel_failure = self._classify_ngrok_output(failure_text)
+            detail = self._describe_tunnel_failure(self._last_tunnel_failure)
+            self.last_url = None
+            self.tunnel_url.set("Туннель: ошибка запуска")
+            self.write_log(f"Туннель не поднялся: {detail}\n")
+            self._schedule_tunnel_recovery(self._last_tunnel_failure)
+            return
+        if tunnel_ready or self.last_url:
+            self.write_log(f"ngrok завершился (exit code: {exit_code})\n")
+            self.last_url = None
+            self.tunnel_url.set("Туннель: упал")
+            self._last_tunnel_failure = TunnelFailure(
+                code="process_crashed",
+                summary=f"ngrok завершился с кодом {exit_code}",
+                recoverable=True,
+            )
+            self._schedule_tunnel_recovery(self._last_tunnel_failure)
+
+    def _validate_tunnel_after_start(self) -> None:
+        if not self.last_url:
+            return
+        tunnel_ok, detail = self._check_public_gpts_ready()
+        self.write_log(f"Автопроверка туннеля: {'OK ✓' if tunnel_ok else detail}\n")
+        if not tunnel_ok:
+            self.write_log(f"Туннель поднялся, но проверка не прошла: {detail}\n")
+
+    def update_openapi_url(self, url: str) -> None:
+        for openapi_file in OPENAPI_FILES:
+            if not openapi_file.exists():
+                continue
+            text = openapi_file.read_text("utf-8")
+            text = re.sub(r"  - url: https://[^\n]+", f"  - url: {url}", text, count=1)
+            openapi_file.write_text(text, "utf-8")
+
+    def stop_all(self) -> None:
+        self._tunnel_restart_count = self._tunnel_max_restarts  # prevent auto-restart during shutdown
+        self._stop_process(self.tunnel_proc, "туннель")
+        if self.agent_proc is not None:
+            self._stop_process(self.agent_proc, "демон")
+        elif self._using_external_daemon:
+            self.write_log("Внешний демон оставляю запущенным: панель его не запускала.\n")
+        self.tunnel_proc = None
+        self.agent_proc = None
+        self._using_external_daemon = False
+        self.last_url = None
+        self._tunnel_blocked_reason = None
+        self._last_tunnel_failure = None
+        self._recovering_tunnel = False
+        self._public_check_failures = 0
+        self.tunnel_url.set("Туннель: не запущен")
+        self.agent_status.set("Демон: не запущен")
+
+    def _stop_process(self, proc: subprocess.Popen | None, label: str) -> None:
+        if not proc or proc.poll() is not None:
+            return
+        self.write_log(f"Останавливаю {label}...\n")
+        proc.send_signal(signal.SIGINT)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+    # --- Health checks ---
+
+    def check_now(self) -> None:
+        threading.Thread(target=self._check_worker, daemon=True).start()
+
+    def _check_worker(self) -> None:
+        local_ok, local_detail = self._url_ok(f"{LOCAL_URL}/health")
+        self.write_log(f"Локальный демон: {'OK ✓' if local_ok else local_detail}\n")
+        if self.last_url:
+            tunnel_ok, tunnel_detail = self._check_public_gpts_ready()
+            self.write_log(f"Публичный URL: {'OK ✓' if tunnel_ok else tunnel_detail}\n")
+        elif self._tunnel_blocked_reason:
+            self.write_log(f"Публичный URL: {self._tunnel_blocked_reason}\n")
+        elif self._last_tunnel_failure:
+            self.write_log(f"Публичный URL: {self._describe_tunnel_failure(self._last_tunnel_failure)}\n")
+        else:
+            self.write_log("Туннель: не запущен\n")
+
+    def _schedule_tunnel_recovery(self, failure: TunnelFailure | None) -> None:
+        if self._recovering_tunnel:
+            return
+        if failure and not failure.recoverable:
+            self.write_log(f"Автовосстановление остановлено: {self._describe_tunnel_failure(failure)}\n")
+            return
+        if self._tunnel_restart_count >= self._tunnel_max_restarts:
+            self.write_log("Автовосстановление остановлено: достигнут лимит попыток.\n")
+            return
+        self._tunnel_restart_count += 1
+        delay = RECOVERY_BACKOFF_STEPS_SEC[min(self._tunnel_restart_count - 1, len(RECOVERY_BACKOFF_STEPS_SEC) - 1)]
+        self._recovering_tunnel = True
+        self.tunnel_url.set("Туннель: восстановление...")
+        self.write_log(
+            f"Пробую восстановить туннель ({self._tunnel_restart_count}/{self._tunnel_max_restarts}) через {delay} сек...\n"
+        )
+        threading.Thread(target=self._recover_tunnel_worker, args=(delay,), daemon=True).start()
+
+    def _recover_tunnel_worker(self, delay: int) -> None:
+        try:
+            time.sleep(delay)
+            daemon_alive = self._local_daemon_ready()
+            if not daemon_alive:
+                self.write_log("Перед восстановлением туннеля локальный демон не отвечает. Пробую поднять всё заново.\n")
+                self._start_all_worker()
+                return
+            self._stop_process(self.tunnel_proc, "туннель")
+            self.tunnel_proc = None
+            self.last_url = None
+            self._public_check_failures = 0
+            self._start_tunnel()
+        finally:
+            self._recovering_tunnel = False
+
+    def _verify_public_url_in_background(self) -> None:
+        if self._public_check_running or not self.last_url:
+            return
+        self._public_check_running = True
+        threading.Thread(target=self._public_check_worker, daemon=True).start()
+
+    def _public_check_worker(self) -> None:
+        try:
+            tunnel_ok, tunnel_detail = self._check_public_gpts_ready()
+            if tunnel_ok:
+                if self._public_check_failures > 0:
+                    self.write_log("Публичный URL снова отвечает.\n")
+                self._public_check_failures = 0
+                return
+            self._public_check_failures += 1
+            self.write_log(
+                f"Проверка публичного URL не прошла ({self._public_check_failures}/{PUBLIC_CHECK_MAX_FAILURES}): {tunnel_detail}\n"
+            )
+            if self._public_check_failures >= PUBLIC_CHECK_MAX_FAILURES:
+                self._last_tunnel_failure = TunnelFailure(
+                    code="public_probe_failed",
+                    summary=f"публичный URL не отвечает: {tunnel_detail}",
+                    recoverable=True,
+                )
+                self._schedule_tunnel_recovery(self._last_tunnel_failure)
+        finally:
+            self._last_public_check_ts = time.time()
+            self._public_check_running = False
+
+    def _check_public_gpts_ready(self) -> tuple[bool, str]:
+        if not self.last_url:
+            return False, "нет URL туннеля"
+        return self._url_ok(
+            f"{self.last_url}/v1/capabilities",
+            attempts=TUNNEL_HEALTH_ATTEMPTS,
+            delay_sec=TUNNEL_HEALTH_DELAY_SEC,
+            expect_json_key="workspace",
+        )
+
+    def _url_ok(
+        self,
+        url: str,
+        attempts: int = 1,
+        delay_sec: float = 0.0,
+        expect_json_key: str | None = None,
+    ) -> tuple[bool, str]:
+        last_error = "не отвечает"
+        ssl_context = ssl.create_default_context(cafile=certifi.where()) if certifi else ssl.create_default_context()
+        for attempt in range(1, attempts + 1):
+            try:
+                request = urllib.request.Request(url)
+                token = self.agent_token()
+                if token:
+                    request.add_header("Authorization", f"Bearer {token}")
+                # ngrok free tier shows interstitial page to browsers;
+                # setting a non-browser User-Agent + ngrok-skip-browser-warning header bypasses it.
+                request.add_header("User-Agent", "GPTAgent/1.0")
+                request.add_header("ngrok-skip-browser-warning", "true")
+                with urllib.request.urlopen(request, timeout=TUNNEL_HEALTH_TIMEOUT_SEC, context=ssl_context) as response:
+                    body = response.read(2000).decode("utf-8", errors="replace")
+                    if not (200 <= response.status < 300):
+                        last_error = f"HTTP {response.status}"
+                    elif expect_json_key:
+                        try:
+                            payload = json.loads(body)
+                        except json.JSONDecodeError:
+                            last_error = "ответ не похож на JSON (возможно interstitial-страница ngrok)"
+                        else:
+                            if expect_json_key in payload:
+                                return True, "OK"
+                            last_error = f"нет поля {expect_json_key}"
+                    else:
+                        return True, "OK"
+            except urllib.error.HTTPError as exc:
+                last_error = f"HTTP {exc.code}"
+            except urllib.error.URLError as exc:
+                reason = getattr(exc, "reason", None)
+                last_error = f"ошибка сети: {reason or exc}"
+            except TimeoutError:
+                last_error = "таймаут"
+
+            if attempt < attempts:
+                time.sleep(delay_sec)
+        return False, last_error
+
+    # --- Monitoring: auto-restart tunnel if it dies ---
+
+    def _poll_status(self) -> None:
+        # Daemon status
+        if self.agent_proc and self.agent_proc.poll() is None:
+            self.agent_status.set("Демон: работает на http://127.0.0.1:8787")
+        elif self._using_external_daemon and self._local_daemon_ready() and self._current_project_owns_port_8787():
+            self.agent_status.set("Демон: уже запущен на http://127.0.0.1:8787")
+        elif self._local_daemon_ready() and not self._current_project_owns_port_8787():
+            self._using_external_daemon = False
+            self.agent_status.set("Демон: на порту 8787 висит другой проект")
+        else:
+            self._using_external_daemon = False
+            self.agent_status.set("Демон: не запущен")
+
+        # Tunnel auto-restart: if daemon is alive but tunnel died, restart tunnel
+        daemon_alive = (self.agent_proc and self.agent_proc.poll() is None) or self._using_external_daemon
+        tunnel_dead = self.tunnel_proc is None or self.tunnel_proc.poll() is not None
+        if (
+            daemon_alive
+            and tunnel_dead
+            and self.last_url is None
+            and self._tunnel_blocked_reason is None
+            and not self._recovering_tunnel
+        ):
+            if self.tunnel_proc is not None:
+                self._schedule_tunnel_recovery(self._last_tunnel_failure)
+
+        tunnel_alive = self.tunnel_proc is not None and self.tunnel_proc.poll() is None and self.last_url is not None
+        if tunnel_alive and (time.time() - self._last_public_check_ts) >= PUBLIC_CHECK_INTERVAL_SEC:
+            self._verify_public_url_in_background()
+
+        self.root.after(TUNNEL_MONITOR_INTERVAL_MS, self._poll_status)
+
+    # --- Clipboard ---
+
+    def copy_url(self) -> None:
+        if not self.last_url:
+            self.write_log("URL ещё нет. Сначала нажми «Запустить».\n")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self.last_url)
+        self.write_log(f"Скопировал URL: {self.last_url}\n")
+
+    def open_env_file(self) -> None:
+        if not ENV_FILE.exists():
+            self.write_log(f"Файл не найден: {ENV_FILE}\n")
+            return
+        try:
+            if shutil.which("open"):
+                subprocess.Popen(["open", str(ENV_FILE)], cwd=PROJECT_DIR)
+                self.write_log(f"Открыл файл настроек: {ENV_FILE}\n")
+            else:
+                self.write_log(
+                    "Не нашёл системную команду open. Открой этот файл вручную:\n"
+                    f"{ENV_FILE}\n"
+                )
+        except Exception as exc:
+            self.write_log(
+                "Не смог открыть файл автоматически.\n"
+                f"Открой его вручную: {ENV_FILE}\n"
+                f"Техническая причина: {exc}\n"
+            )
+
+    # --- Lifecycle ---
+
+    def on_close(self) -> None:
+        self.stop_all()
+        self.root.destroy()
+
+    def run(self) -> None:
+        self.root.mainloop()
+
+
+if __name__ == "__main__":
+    ControlPanel().run()

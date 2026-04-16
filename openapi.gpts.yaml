@@ -1,0 +1,912 @@
+openapi: 3.1.0
+info:
+  title: Second Lane API
+  version: 3.1.0
+  description: |
+    Second Lane — local GPT Actions runtime by Yurii Slepnev.
+    Official links: Telegram https://t.me/yurii_yurii86 | YouTube https://youtube.com/@yurii_yurii86 | Instagram https://instagram.com/yurii_yurii86
+    License: Apache-2.0
+  contact:
+    name: Yurii Slepnev
+    url: https://t.me/yurii_yurii86
+servers:
+  - url: https://your-domain.ngrok-free.dev
+components:
+  schemas:
+    SessionRecord:
+      type: object
+      required: [path, session_id, agent_name, user_goal, scope, files_changed, commands_run, summary, result, next_step]
+      properties:
+        path:
+          type: string
+        session_id:
+          type: string
+        agent_name:
+          type: string
+        user_goal:
+          type: string
+        scope:
+          type: array
+          items:
+            type: string
+        files_changed:
+          type: array
+          items:
+            type: string
+        commands_run:
+          type: array
+          items:
+            type: string
+        summary:
+          type: string
+        result:
+          type: string
+        next_step:
+          type: string
+        started_at:
+          type: string
+        ended_at:
+          type: string
+    HandoffState:
+      type: object
+      required: [current_state, last_verified_step, next_suggested_step, main_risks]
+      properties:
+        current_state:
+          type: string
+        last_verified_step:
+          type: string
+        next_suggested_step:
+          type: string
+        main_risks:
+          type: array
+          items:
+            type: string
+    ActiveTasksState:
+      type: object
+      required: [active_tasks, open_risks, blockers, next_resume_hint]
+      properties:
+        active_tasks:
+          type: array
+          items:
+            type: object
+        open_risks:
+          type: array
+          items:
+            type: object
+        blockers:
+          type: array
+          items:
+            type: string
+        next_resume_hint:
+          type: string
+    FinalizeWorkResponse:
+      type: object
+      required: [ok, session]
+      properties:
+        ok:
+          type: boolean
+        session:
+          $ref: '#/components/schemas/SessionRecord'
+    UpdateHandoffResponse:
+      type: object
+      required: [ok, handoff]
+      properties:
+        ok:
+          type: boolean
+        handoff:
+          $ref: '#/components/schemas/HandoffState'
+    UpdateActiveTasksResponse:
+      type: object
+      required: [ok, active_tasks]
+      properties:
+        ok:
+          type: boolean
+        active_tasks:
+          $ref: '#/components/schemas/ActiveTasksState'
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+security:
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      operationId: health
+      summary: Health check
+      responses:
+        '200':
+          description: OK
+  /v1/capabilities:
+    get:
+      operationId: getCapabilities
+      summary: Get agent capabilities
+      responses:
+        '200':
+          description: OK
+  /v1/providers:
+    get:
+      operationId: getProviders
+      summary: Get available optional providers
+      responses:
+        '200':
+          description: OK
+  /v1/flows/inspect_project:
+    post:
+      operationId: inspectProject
+      summary: Inspect a project folder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path:
+                  type: string
+                agent_name:
+                  type: string
+                change_kind:
+                  type: string
+      responses:
+        '200':
+          description: OK
+  /v1/project/ensure_memory:
+    post:
+      operationId: ensureProjectMemory
+      summary: Create project memory if missing and return the current memory snapshot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path:
+                  type: string
+                project_name:
+                  type: string
+                agent_name:
+                  type: string
+                change_kind:
+                  type: string
+      responses:
+        '200':
+          description: OK
+  /v1/project/safe_patch_and_verify:
+    post:
+      operationId: safePatchAndVerifyProjectFile
+      summary: Apply a guarded file patch, run a verification command, and optionally rollback on failure
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path, file_path, search_text, replace_text, verify_argv]
+              properties:
+                path:
+                  type: string
+                file_path:
+                  type: string
+                search_text:
+                  type: string
+                replace_text:
+                  type: string
+                verify_argv:
+                  type: array
+                  items:
+                    type: string
+                expected_occurrences:
+                  type: integer
+                  minimum: 1
+                verify_cwd:
+                  type: string
+                verify_timeout_sec:
+                  type: integer
+                  minimum: 1
+                rollback_on_failure:
+                  type: boolean
+                note:
+                  type: string
+      responses:
+        '200':
+          description: OK
+  /v1/project/apply_patch:
+    post:
+      operationId: applyPatch
+      summary: Apply a safe multi-step patch to one project file with checkpoint support
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path, file_path, operations]
+              properties:
+                path:
+                  type: string
+                file_path:
+                  type: string
+                operations:
+                  type: array
+                  items:
+                    type: object
+                    required: [search_text, replace_text]
+                    properties:
+                      search_text:
+                        type: string
+                      replace_text:
+                        type: string
+                      expected_occurrences:
+                        type: integer
+                        minimum: 1
+                note:
+                  type: string
+      responses:
+        '200':
+          description: OK
+  /v1/project/multi_file_patch_and_verify:
+    post:
+      operationId: multiFilePatchAndVerify
+      summary: Apply coordinated patches across multiple files, run verification, and rollback on failure
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path, patches, verify_argv]
+              properties:
+                path:
+                  type: string
+                patches:
+                  type: array
+                  items:
+                    type: object
+                    required: [file_path, operations]
+                    properties:
+                      file_path:
+                        type: string
+                      operations:
+                        type: array
+                        items:
+                          type: object
+                          required: [search_text, replace_text]
+                          properties:
+                            search_text:
+                              type: string
+                            replace_text:
+                              type: string
+                            expected_occurrences:
+                              type: integer
+                              minimum: 1
+                verify_argv:
+                  type: array
+                  items:
+                    type: string
+                verify_cwd:
+                  type: string
+                verify_timeout_sec:
+                  type: integer
+                  minimum: 1
+                rollback_on_failure:
+                  type: boolean
+                note:
+                  type: string
+      responses:
+        '200':
+          description: OK
+  /v1/project/run_test:
+    post:
+      operationId: runTest
+      summary: Detect or use an explicit test command, run it, and return a structured test result
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path:
+                  type: string
+                command:
+                  type: array
+                  items:
+                    type: string
+                cwd:
+                  type: string
+                test_target:
+                  type: string
+                timeout_sec:
+                  type: integer
+                  minimum: 1
+      responses:
+        '200':
+          description: OK
+  /v1/project/analyze_build_failure:
+    post:
+      operationId: analyzeProjectBuildFailure
+      summary: Run a build or verification command and classify the likely failure layer for triage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path, argv]
+              properties:
+                path:
+                  type: string
+                argv:
+                  type: array
+                  items:
+                    type: string
+                cwd:
+                  type: string
+                timeout_sec:
+                  type: integer
+                  minimum: 1
+      responses:
+        '200':
+          description: OK
+  /v1/project/run_service_and_smoke_check:
+    post:
+      operationId: runProjectServiceAndSmokeCheck
+      summary: Start a service command, wait for startup, run a bounded smoke check, and stop the service
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path, service_argv, smoke_argv]
+              properties:
+                path:
+                  type: string
+                service_argv:
+                  type: array
+                  items:
+                    type: string
+                smoke_argv:
+                  type: array
+                  items:
+                    type: string
+                service_cwd:
+                  type: string
+                smoke_cwd:
+                  type: string
+                startup_text:
+                  type: string
+                startup_timeout_sec:
+                  type: integer
+                  minimum: 1
+                startup_wait_sec:
+                  type: number
+                  minimum: 0
+                smoke_timeout_sec:
+                  type: integer
+                  minimum: 1
+      responses:
+        '200':
+          description: OK
+  /v1/project/update_handoff:
+    post:
+      operationId: updateProjectHandoff
+      summary: Update the current handoff state for a project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path, current_state, last_verified_step, next_suggested_step]
+              properties:
+                path:
+                  type: string
+                current_state:
+                  type: string
+                last_verified_step:
+                  type: string
+                next_suggested_step:
+                  type: string
+                main_risks:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateHandoffResponse'
+  /v1/project/update_active_tasks:
+    post:
+      operationId: updateProjectActiveTasks
+      summary: Update active tasks and resume hints for a project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path, next_resume_hint]
+              properties:
+                path:
+                  type: string
+                active_tasks:
+                  type: array
+                  items:
+                    type: object
+                open_risks:
+                  type: array
+                  items:
+                    type: object
+                blockers:
+                  type: array
+                  items:
+                    type: string
+                next_resume_hint:
+                  type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateActiveTasksResponse'
+  /v1/project/finalize_work:
+    post:
+      operationId: finalizeProjectWork
+      summary: Finalize one serious work session by writing memory logs and current handoff state
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path, agent_name, user_goal, summary, result, next_step, handoff, active_tasks]
+              properties:
+                path:
+                  type: string
+                session_id:
+                  type: string
+                agent_name:
+                  type: string
+                user_goal:
+                  type: string
+                scope:
+                  type: array
+                  items:
+                    type: string
+                files_changed:
+                  type: array
+                  items:
+                    type: string
+                commands_run:
+                  type: array
+                  items:
+                    type: string
+                summary:
+                  type: string
+                result:
+                  type: string
+                next_step:
+                  type: string
+                started_at:
+                  type: string
+                ended_at:
+                  type: string
+                change:
+                  type: object
+                  required: [kind, reason, status]
+                  properties:
+                    change_id:
+                      type: string
+                    kind:
+                      type: string
+                    paths:
+                      type: array
+                      items:
+                        type: string
+                    reason:
+                      type: string
+                    verification:
+                      type: array
+                      items:
+                        type: string
+                    status:
+                      type: string
+                    timestamp:
+                      type: string
+                system_state:
+                  type: object
+                  required: [project_name, project_type, project_status]
+                  properties:
+                    project_name:
+                      type: string
+                    project_type:
+                      type: string
+                    project_status:
+                      type: string
+                    entrypoints:
+                      type: array
+                      items:
+                        type: string
+                    run_commands:
+                      type: array
+                      items:
+                        type: string
+                    build_commands:
+                      type: array
+                      items:
+                        type: string
+                    test_commands:
+                      type: array
+                      items:
+                        type: string
+                    key_paths:
+                      type: array
+                      items:
+                        type: string
+                    external_services:
+                      type: array
+                      items:
+                        type: string
+                    load_bearing_files:
+                      type: array
+                      items:
+                        type: string
+                    environment_constraints:
+                      type: array
+                      items:
+                        type: string
+                    security_constraints:
+                      type: array
+                      items:
+                        type: string
+                    workflow_constraints:
+                      type: array
+                      items:
+                        type: string
+                handoff:
+                  type: object
+                  required: [current_state, last_verified_step, next_suggested_step]
+                  properties:
+                    current_state:
+                      type: string
+                    last_verified_step:
+                      type: string
+                    next_suggested_step:
+                      type: string
+                    main_risks:
+                      type: array
+                      items:
+                        type: string
+                active_tasks:
+                  type: object
+                  required: [next_resume_hint]
+                  properties:
+                    active_tasks:
+                      type: array
+                      items:
+                        type: object
+                    open_risks:
+                      type: array
+                      items:
+                        type: object
+                    blockers:
+                      type: array
+                      items:
+                        type: string
+                    next_resume_hint:
+                      type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FinalizeWorkResponse'
+  /v1/workspace/read_file:
+    post:
+      operationId: readFile
+      summary: Read file from workspace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path:
+                  type: string
+      responses:
+        '200':
+          description: OK
+  /v1/workspace/write_file:
+    post:
+      operationId: writeFile
+      summary: Write file to workspace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path, content]
+              properties:
+                path:
+                  type: string
+                content:
+                  type: string
+      responses:
+        '200':
+          description: OK
+  /v1/workspace/search:
+    post:
+      operationId: searchWorkspace
+      summary: Search text in workspace files
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [root, query]
+              properties:
+                root:
+                  type: string
+                query:
+                  type: string
+                max_results:
+                  type: integer
+      responses:
+        '200':
+          description: OK
+  /v1/workspace/list_dir:
+    post:
+      operationId: listDirectory
+      summary: List files and directories in a workspace folder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path:
+                  type: string
+                max_entries:
+                  type: integer
+      responses:
+        '200':
+          description: OK
+  /v1/exec/run:
+    post:
+      operationId: runCommand
+      summary: Run a command in a workspace directory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [argv, cwd]
+              properties:
+                argv:
+                  type: array
+                  items:
+                    type: string
+                cwd:
+                  type: string
+                timeout_sec:
+                  type: integer
+      responses:
+        '200':
+          description: OK
+  /v1/exec/start:
+    post:
+      operationId: startCommand
+      summary: Start a long-running command in a workspace directory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [argv, cwd]
+              properties:
+                argv:
+                  type: array
+                  items:
+                    type: string
+                cwd:
+                  type: string
+      responses:
+        '200':
+          description: OK
+  /v1/exec/status:
+    post:
+      operationId: getCommandStatus
+      summary: Get current status and metadata for a long-running command
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [process_id]
+              properties:
+                process_id:
+                  type: integer
+      responses:
+        '200':
+          description: OK
+  /v1/exec/logs:
+    post:
+      operationId: getCommandLogs
+      summary: Get logs for a long-running command
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [process_id]
+              properties:
+                process_id:
+                  type: integer
+                max_chars:
+                  type: integer
+      responses:
+        '200':
+          description: OK
+  /v1/exec/stop:
+    post:
+      operationId: stopCommand
+      summary: Stop a long-running command
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [process_id]
+              properties:
+                process_id:
+                  type: integer
+      responses:
+        '200':
+          description: OK
+  /v1/git/status:
+    post:
+      operationId: gitStatus
+      summary: Get git status
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cwd]
+              properties:
+                cwd:
+                  type: string
+      responses:
+        '200':
+          description: OK
+  /v1/git/diff:
+    post:
+      operationId: gitDiff
+      summary: Get git diff
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cwd]
+              properties:
+                cwd:
+                  type: string
+      responses:
+        '200':
+          description: OK
+  /v1/http/request:
+    post:
+      operationId: httpRequest
+      summary: Generic HTTP request for optional providers and public APIs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [method, url]
+              properties:
+                method:
+                  type: string
+                url:
+                  type: string
+                headers:
+                  type: object
+                  additionalProperties:
+                    type: string
+                body:
+                  type: string
+                  description: Optional request body as a string. Use JSON text when calling JSON APIs.
+      responses:
+        '200':
+          description: OK
+  /v1/system/open_path:
+    post:
+      operationId: openSystemPath
+      summary: Open a local file or folder on the user's computer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path:
+                  type: string
+                reveal:
+                  type: boolean
+      responses:
+        '200':
+          description: OK
+  /v1/system/open_app:
+    post:
+      operationId: openSystemApp
+      summary: Open an allowlisted application on the user's computer by name
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [app_name]
+              properties:
+                app_name:
+                  type: string
+                args:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: OK
+  /v1/ssh/exec:
+    post:
+      operationId: sshExec
+      summary: Execute command on allowlisted SSH host
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [host, username, command]
+              properties:
+                host:
+                  type: string
+                username:
+                  type: string
+                password:
+                  type: string
+                command:
+                  type: string
+                port:
+                  type: integer
+      responses:
+        '200':
+          description: OK

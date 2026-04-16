@@ -1,0 +1,6 @@
+{
+  "name": "vercel",
+  "enabled": false,
+  "description": "Optional provider manifest placeholder for Vercel-related actions",
+  "required_env": ["PROVIDER_VERCEL_TOKEN"]
+}

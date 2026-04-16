@@ -1,0 +1,6 @@
+{
+  "name": "github",
+  "enabled": false,
+  "description": "Optional provider manifest placeholder for GitHub-related actions",
+  "required_env": ["PROVIDER_GITHUB_TOKEN"]
+}

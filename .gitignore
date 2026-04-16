@@ -1,0 +1,35 @@
+# OS and editor noise
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Python caches and virtualenvs
+__pycache__/
+*/__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.venv/
+.venv*/
+venv/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Local secrets and machine-specific env
+.env
+.env.local
+.env.*.local
+
+# Runtime data
+*.log
+data/*.db
+
+# Local project memory and generated state
+.ai_context/
+
+# Temporary local outputs
+.tmp_*
