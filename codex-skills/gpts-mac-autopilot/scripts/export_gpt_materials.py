@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import sys
 from pathlib import Path
 
-
-def find_branch_root(raw_root: Path) -> Path:
-    candidates = [raw_root, raw_root / "Версия для Мак"]
-    for candidate in candidates:
-        if (candidate / ".env.example").exists():
-            return candidate
-    raise SystemExit("Could not find macOS project root with .env.example")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _common import find_branch_root  # noqa: E402
 
 
 def main():

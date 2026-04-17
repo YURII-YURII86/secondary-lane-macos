@@ -2,15 +2,11 @@
 import argparse
 import json
 import secrets
+import sys
 from pathlib import Path
 
-
-def find_branch_root(raw_root: Path) -> Path:
-    candidates = [raw_root, raw_root / "Версия для Мак"]
-    for candidate in candidates:
-        if (candidate / ".env.example").exists():
-            return candidate
-    raise SystemExit("Could not find macOS project root with .env.example")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _common import find_branch_root  # noqa: E402
 
 
 def parse_lines(text: str):
@@ -53,7 +49,10 @@ def main():
     agent_token = args.agent_token or secrets.token_urlsafe(48)
     ngrok_domain = args.ngrok_domain.replace("https://", "").strip().strip("/")
 
-    workspace_roots = ":".join([workspace_root, str(Path.home() / "Documents"), "/workspace"])
+    # Only the real project root by default — do not advertise bogus
+    # ~/Documents / /workspace placeholders that confused users into
+    # thinking the agent had access to (or needed) those folders.
+    workspace_roots = workspace_root
     lines = set_key(lines, "AGENT_TOKEN", agent_token)
     lines = set_key(lines, "NGROK_DOMAIN", ngrok_domain)
     lines = set_key(lines, "WORKSPACE_ROOTS", workspace_roots)

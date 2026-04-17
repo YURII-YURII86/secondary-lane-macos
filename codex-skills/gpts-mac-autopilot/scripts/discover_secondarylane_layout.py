@@ -42,10 +42,38 @@ def main():
     parser.add_argument("--max-depth", type=int, default=4)
     args = parser.parse_args()
     root = Path(args.search_root).expanduser().resolve()
-    candidates = [root]
-    for path in root.rglob("*"):
-        if path.is_dir() and len(path.relative_to(root).parts) <= args.max_depth:
-            candidates.append(path)
+
+    # Bounded BFS instead of root.rglob("*") which previously walked
+    # the entire subtree (potentially millions of files under iCloud,
+    # Time Machine or ~/Library) and blew up on TCC-protected dirs.
+    SKIP_DIRS = {
+        ".git", "__pycache__", "node_modules",
+        ".venv", "venv", ".idea", ".vscode",
+        "Library", "Pictures", "Movies", "Music",
+    }
+    candidates = []
+    frontier: list[tuple[Path, int]] = [(root, 0)]
+    while frontier:
+        current, depth = frontier.pop(0)
+        candidates.append(current)
+        if depth >= args.max_depth:
+            continue
+        try:
+            children = list(current.iterdir())
+        except (PermissionError, OSError):
+            continue
+        for child in children:
+            try:
+                if not child.is_dir():
+                    continue
+            except (PermissionError, OSError):
+                continue
+            name = child.name
+            if name in SKIP_DIRS:
+                continue
+            if name.startswith(".") and name not in ("."):
+                continue
+            frontier.append((child, depth + 1))
     results = []
     seen = set()
     for candidate in candidates:
