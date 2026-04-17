@@ -502,15 +502,31 @@ class ControlPanel:
                 "Python 3.14 для этого pinned stack не считается поддержанным.\n"
             )
             return False
-        self.write_log("Не нашёл готовый uvicorn. Создаю окружение и ставлю зависимости через python3.13...\n")
+        self.write_log("Не нашёл готовый uvicorn. Создаю окружение через python3.13...\n")
         try:
             uvicorn_bin = self.uvicorn_bin()
-            subprocess.run([PYTHON, "-m", "venv", str(uvicorn_bin.parent.parent)], cwd=PROJECT_DIR, check=True)
-            subprocess.run(
-                [str(uvicorn_bin.parent / "pip"), "install", "-r", str(PROJECT_DIR / "requirements.txt")],
+            venv_result = subprocess.run(
+                [PYTHON, "-m", "venv", str(uvicorn_bin.parent.parent)],
                 cwd=PROJECT_DIR,
-                check=True,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, timeout=60,
             )
+            if venv_result.returncode != 0:
+                self.write_log(f"venv не создался:\n{venv_result.stdout or ''}\n")
+                return False
+            self.write_log("Виртуальное окружение создано. Устанавливаю зависимости...\n")
+            pip_proc = subprocess.Popen(
+                [str(uvicorn_bin.parent / "pip"), "install", "--quiet", "-r", str(PROJECT_DIR / "requirements.txt")],
+                cwd=PROJECT_DIR,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True,
+            )
+            threading.Thread(target=self._stream_process, args=(pip_proc, "pip"), daemon=True).start()
+            pip_proc.wait()
+            if pip_proc.returncode != 0:
+                self.write_log("pip install завершился с ошибкой — проверь лог выше.\n")
+                return False
+            self.write_log("Зависимости установлены.\n")
             return True
         except Exception as exc:
             self.write_log(f"Не смог подготовить Python-окружение через {PYTHON}: {exc}\n")
