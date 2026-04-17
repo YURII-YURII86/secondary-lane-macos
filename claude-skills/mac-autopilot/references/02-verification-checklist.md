@@ -25,7 +25,8 @@ grep -E "^(AGENT_TOKEN|NGROK_DOMAIN|WORKSPACE_ROOTS)=" <branch_root>/.env
 ## Панель и тоннель
 
 ```bash
-# 5. Панель жива
+# 5. GUI-окно «GPTS Agent Control» открыто (визуальная проверка)
+# Панель отвечает по API:
 curl -s --max-time 5 http://localhost:8787/v1/capabilities
 # ожидается: JSON с ok:true
 

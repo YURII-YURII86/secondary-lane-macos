@@ -175,9 +175,27 @@ fi
 
 ---
 
-### S6. Запустить панель в фоне
+### S6. Запустить панель управления
 
-**Автоматически:**
+`gpts_agent_control.py` — это **GUI-приложение** (Tkinter). При запуске
+открывается окно «GPTS Agent Control» с кнопками управления, статусом
+демона, URL тоннеля и логом. Это окно должно **оставаться открытым**
+пока пользователь работает с GPT.
+
+**Скажи пользователю:**
+
+> «Сейчас откроется окно панели управления Second Lane.
+> Не закрывай его — ChatGPT общается с агентом пока это окно открыто.»
+
+**Способ 1 — через лончер (рекомендуется, самый простой):**
+
+```bash
+open "<branch_root>/Запустить Second Lane.command"
+```
+
+Это откроет Terminal с запущенной панелью.
+
+**Способ 2 — напрямую из терминала:**
 
 ```bash
 cd <branch_root>
@@ -185,30 +203,21 @@ cd <branch_root>
 # Убедиться что порт 8787 свободен
 lsof -ti:8787 | xargs kill -9 2>/dev/null; sleep 1
 
-# Запустить в фоне, лог в файл
-nohup .venv/bin/python gpts_agent_control.py > /tmp/secondlane_panel.log 2>&1 &
-echo "PID=$!"
+# Запустить — откроется GUI-окно
+.venv/bin/python gpts_agent_control.py
 ```
 
-**Подождать старта (до 15 сек):**
+> Если нужно запустить в фоне без GUI (только сервер, без окна управления):
+> `nohup .venv/bin/python gpts_agent_control.py > /tmp/secondlane.log 2>&1 &`
+> Но тогда пользователь теряет кнопки «Скопировать URL», «Проверить» и т.д.
+
+**Проверить что панель поднялась** (из другого терминала или через Claude Code):
 
 ```bash
-for i in $(seq 1 15); do
-  sleep 1
-  if curl -s --max-time 2 http://localhost:8787/v1/capabilities >/dev/null 2>&1; then
-    echo "PANEL_UP"
-    break
-  fi
-  echo "Waiting... $i/15"
-done
+curl -s --max-time 5 http://localhost:8787/v1/capabilities
 ```
 
-**Если PANEL_UP не появился:**
-- Показать последние строки лога: `tail -30 /tmp/secondlane_panel.log`
-- Классифицировать ошибку (port busy / dependency missing / syntax error)
-- Устранить и перезапустить
-
-**Принято если:** `curl http://localhost:8787/v1/capabilities` → JSON с полем `ok: true`
+**Принято если:** открылось GUI-окно с URL тоннеля + curl возвращает `ok: true`
 
 ---
 
@@ -369,13 +378,14 @@ AGENT_TOKEN:       (хранится в .env — не делиться)
 Публичный URL:     <ngrok_domain>
 
 Что должно оставаться открытым пока пользуешься GPT:
-  1. Это окно терминала (или панель работает в фоне — PID <pid>)
-  2. ngrok (PID <pid>)
+  1. Окно «GPTS Agent Control» (панель управления) — не закрывай
+  2. ngrok (запускается автоматически из той же панели или отдельно)
 
 Как перезапустить если что-то упало:
+  Двойной клик по «Запустить Second Lane.command»
+  — или —
   cd <branch_root>
-  .venv/bin/python gpts_agent_control.py &
-  ngrok http 8787 --domain=<ngrok_domain> &
+  .venv/bin/python gpts_agent_control.py
 
 Если GPT вдруг перестаёт отвечать:
   1. Проверь http://localhost:8787/v1/capabilities
