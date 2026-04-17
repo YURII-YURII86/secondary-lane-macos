@@ -1,0 +1,4 @@
+interface:
+  display_name: "Second Lane — Claude Code Autopilot"
+  short_description: "Полностью автоматическая установка Second Lane на macOS через Claude Code"
+  default_prompt: "Открой $claude-code-autopilot и разверни Second Lane на моём Mac полностью автоматически: найди проект, проверь Python и ngrok, создай .env, подними панель, настрой тоннель, помоги собрать GPT в ChatGPT. Делай максимум сам — останавливайся только там где реально нужны мои руки. Говори по-русски."
