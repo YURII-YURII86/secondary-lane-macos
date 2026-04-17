@@ -213,7 +213,8 @@ class ControlPanel:
         tk.Button(btn, text="↺  Перезапустить", **_s, command=self.restart_daemon).pack(side=tk.LEFT, padx=(0, 6))
         tk.Button(btn, text="■  Выключить",      **_d, command=self.stop_all).pack(side=tk.LEFT, padx=(0, 28))
         tk.Button(btn, text="✓  Проверить",      **_s, command=self.check_now).pack(side=tk.LEFT, padx=(0, 6))
-        tk.Button(btn, text="⚙  Открыть .env",  **_s, command=self.open_env_file).pack(side=tk.LEFT)
+        tk.Button(btn, text="⚙  Открыть .env",  **_s, command=self.open_env_file).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(btn, text="Файлы GPT",         **_s, command=self.open_project_folder).pack(side=tk.LEFT)
 
         # ── Log console ───────────────────────────────────────────────────
         lhdr = tk.Frame(self.root, bg=_C["mantle"])
@@ -450,15 +451,28 @@ class ControlPanel:
             return "временный сетевой сбой при подключении к ngrok."
         return failure.summary
 
+    def _find_ngrok(self) -> str | None:
+        """Return full path to ngrok, checking PATH and Homebrew locations."""
+        found = shutil.which("ngrok")
+        if found:
+            return found
+        # Homebrew: Apple Silicon (/opt/homebrew) and Intel (/usr/local)
+        for p in ("/opt/homebrew/bin/ngrok", "/usr/local/bin/ngrok"):
+            if Path(p).exists():
+                self.write_log(f"ngrok найден вне PATH: {p}\n")
+                return p
+        return None
+
     def _preflight_tunnel_check(self) -> tuple[bool, str]:
-        if not shutil.which("ngrok"):
-            return False, "ngrok не найден. Установи: brew install ngrok"
+        ngrok_path = self._find_ngrok()
+        if not ngrok_path:
+            return False, "ngrok не найден. Установи: brew install ngrok/ngrok/ngrok"
         domain = self.ngrok_domain().strip()
         if not domain:
             return False, "в .env не задан NGROK_DOMAIN"
         try:
             result = subprocess.run(
-                ["ngrok", "config", "check"],
+                [ngrok_path, "config", "check"],
                 cwd=PROJECT_DIR,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -738,8 +752,9 @@ class ControlPanel:
         self._last_tunnel_failure = None
         self.write_log(f"Запускаю ngrok туннель → {public_url} ...\n")
 
+        ngrok_cmd = self._find_ngrok() or "ngrok"
         self.tunnel_proc = subprocess.Popen(
-            ["ngrok", "http", "8787", f"--url={domain}", "--log=stdout", "--log-format=logfmt"],
+            [ngrok_cmd, "http", "8787", f"--url={domain}", "--log=stdout", "--log-format=logfmt"],
             cwd=PROJECT_DIR,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -1034,6 +1049,33 @@ class ControlPanel:
         self.root.clipboard_clear()
         self.root.clipboard_append(self.last_url)
         self.write_log(f"Скопировал URL: {self.last_url}\n")
+
+    def open_project_folder(self) -> None:
+        """Open the project folder in Finder and log which files to use for GPT setup."""
+        try:
+            if shutil.which("open"):
+                subprocess.Popen(["open", str(PROJECT_DIR)])
+            else:
+                subprocess.Popen(["xdg-open", str(PROJECT_DIR)])
+        except Exception as exc:
+            self.write_log(f"Не смог открыть папку: {exc}\n")
+            return
+        openapi = PROJECT_DIR / "openapi.gpts.yaml"
+        instructions = PROJECT_DIR / "gpts" / "system_instructions.txt"
+        knowledge_dir = PROJECT_DIR / "gpts" / "knowledge"
+        token = self.agent_token()
+        token_hint = f"{token[:6]}...{token[-4:]}" if len(token) > 12 else "(не задан)"
+        self.write_log(
+            f"Открыл папку: {PROJECT_DIR}\n"
+            "\nФайлы для настройки GPT в ChatGPT:\n"
+            f"  Instructions → {instructions.name}  "
+            f"({'есть' if instructions.exists() else 'НЕТ'})\n"
+            f"  Knowledge    → папка {knowledge_dir.name}/  "
+            f"({'есть' if knowledge_dir.exists() else 'НЕТ'})\n"
+            f"  Actions      → {openapi.name}  "
+            f"({'есть' if openapi.exists() else 'НЕТ'})\n"
+            f"  Auth Bearer  → AGENT_TOKEN = {token_hint}\n"
+        )
 
     def open_env_file(self) -> None:
         if not ENV_FILE.exists():
