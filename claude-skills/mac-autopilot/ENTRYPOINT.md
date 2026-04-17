@@ -21,7 +21,13 @@
 
 ## Адаптивное обнаружение проекта
 
-Перед чем-либо — найди корень проекта:
+Перед чем-либо — запусти preflight и найди корень проекта:
+
+```bash
+python3 claude-skills/mac-autopilot/scripts/run_preflight.py .
+```
+
+Или только discovery:
 
 ```bash
 python3 codex-skills/gpts-mac-autopilot/scripts/discover_secondarylane_layout.py . --max-depth 4

@@ -2,7 +2,7 @@
 """Preflight check для Claude Code Autopilot.
 
 Запускать из корня репозитория:
-    python3 codex-skills/claude-code-autopilot/scripts/run_preflight.py [search_root]
+    python3 claude-skills/mac-autopilot/scripts/run_preflight.py [search_root]
 
 Выводит JSON-отчёт о текущем реальном состоянии всех компонентов
 Second Lane. Claude Code использует этот вывод для определения
@@ -17,8 +17,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Добавить путь к shared helpers
-_SCRIPTS_DIR = Path(__file__).resolve().parent.parent.parent / "gpts-mac-autopilot" / "scripts"
+# Добавить путь к shared helpers из codex-skills/gpts-mac-autopilot/scripts/
+# Структура: claude-skills/mac-autopilot/scripts/ → ../../../codex-skills/gpts-mac-autopilot/scripts/
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "codex-skills" / "gpts-mac-autopilot" / "scripts"
 sys.path.insert(0, str(_SCRIPTS_DIR))
 from _common import find_branch_root  # noqa: E402
 
