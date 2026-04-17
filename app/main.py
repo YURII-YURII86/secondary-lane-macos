@@ -464,15 +464,65 @@ def _inspect_project(path: Path) -> dict[str, Any]:
 
 
 def _classify_failure(output: str) -> str:
+    """Classify a failing subprocess output into a short, actionable label.
+
+    Ordered most-specific first so e.g. a TypeScript compile error is
+    labelled "typescript error" rather than the generic "build tool
+    failure".
+    """
     lowered = output.lower()
+
+    # Python dependency / import / syntax
     if "module not found" in lowered or "no module named" in lowered:
         return "missing dependency"
-    if "syntaxerror" in lowered:
+    if "importerror" in lowered or "cannot import name" in lowered:
+        return "import error"
+    if "syntaxerror" in lowered or "indentationerror" in lowered:
         return "syntax error"
-    if "permission denied" in lowered:
+
+    # Filesystem / permission / missing tool
+    if "permission denied" in lowered or "eacces" in lowered:
         return "permission issue"
-    if "address already in use" in lowered:
+    if "command not found" in lowered or "is not recognized" in lowered:
+        return "missing executable"
+    if "no such file or directory" in lowered or "enoent" in lowered:
+        return "missing file"
+
+    # Networking / ports
+    if "address already in use" in lowered or "eaddrinuse" in lowered:
         return "port already in use"
+    if "connection refused" in lowered or "econnrefused" in lowered:
+        return "connection refused"
+    if "timed out" in lowered or "timeout" in lowered:
+        return "network timeout"
+
+    # Process-level crashes
+    if "segmentation fault" in lowered or "segfault" in lowered:
+        return "segfault"
+    if ("out of memory" in lowered) or ("killed" in lowered and "oom" in lowered):
+        return "out of memory"
+
+    # Language / tooling specific
+    if "error ts" in lowered or "tsc:" in lowered:
+        return "typescript error"
+    if "cannot find module" in lowered:
+        return "missing dependency"
+    if "error:" in lowered and any(tool in lowered for tool in ("webpack", "rollup", "esbuild", "vite")):
+        return "build tool failure"
+
+    # Test-runner output
+    if "assertionerror" in lowered:
+        return "assertion failure"
+    if "failed" in lowered and any(token in lowered for token in ("test", "pytest", "jest")):
+        return "test failure"
+
+    # Generic runtime fallback
+    if "traceback" in lowered or "exception" in lowered:
+        return "runtime exception"
+
+    if not lowered.strip():
+        return "silent failure"
+
     return "unknown"
 
 
@@ -851,7 +901,20 @@ def run_service_and_smoke_check(req: RunServiceReq, _auth: None = Depends(auth_d
                 time.sleep(req.startup_wait_sec)
             started = proc.poll() is None
         smoke = run_subprocess(req.smoke_argv, smoke_cwd, req.smoke_timeout_sec, settings.max_output_chars)
-        return {"ok": started and smoke["ok"], "started": started, "service_output": lines[-50:], "smoke": smoke}
+        # Readiness fallback: if the startup_text did not match literally
+        # but the smoke check still succeeded, treat the service as
+        # started. This fixes the false-negative where a correctly-
+        # running service returned started=false just because its log
+        # line differed by a character from startup_text.
+        readiness = "startup_text" if started else ("smoke_check" if smoke["ok"] else None)
+        started = started or smoke["ok"]
+        return {
+            "ok": started and smoke["ok"],
+            "started": started,
+            "readiness": readiness,
+            "service_output": lines[-50:],
+            "smoke": smoke,
+        }
     finally:
         if proc.poll() is None:
             proc.terminate()
@@ -1047,15 +1110,45 @@ def stop_command(req: ProcessReq, _auth: None = Depends(auth_dependency)) -> dic
     return {"ok": True, "process_id": req.process_id}
 
 
+def _find_git_root(start: Path) -> Path | None:
+    """Walk up from ``start`` looking for a directory that contains a
+    ``.git`` entry (directory or file for worktrees)."""
+    current = start.resolve()
+    for _ in range(64):
+        if (current / ".git").exists():
+            return current
+        if current.parent == current:
+            return None
+        current = current.parent
+    return None
+
+
+def _not_a_repo_response(cwd: Path) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "not_a_repo": True,
+        "cwd": str(cwd),
+        "output": (
+            f"Not inside a git repository: {cwd}\n"
+            "Run `git init` here, or call this endpoint with a cwd that "
+            "lives inside a git working tree."
+        ),
+    }
+
+
 @app.post("/v1/git/status")
 def git_status(req: GitReq, _auth: None = Depends(auth_dependency)) -> dict[str, Any]:
     cwd = resolve_allowed_path(settings, req.cwd)
+    if _find_git_root(cwd) is None:
+        return _not_a_repo_response(cwd)
     return run_subprocess(["git", "status", "--short"], cwd, settings.default_timeout_sec, settings.max_output_chars)
 
 
 @app.post("/v1/git/diff")
 def git_diff(req: GitReq, _auth: None = Depends(auth_dependency)) -> dict[str, Any]:
     cwd = resolve_allowed_path(settings, req.cwd)
+    if _find_git_root(cwd) is None:
+        return _not_a_repo_response(cwd)
     return run_subprocess(["git", "diff"], cwd, settings.default_timeout_sec, settings.max_output_chars)
 
 
