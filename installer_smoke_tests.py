@@ -970,6 +970,38 @@ class BootstrapScriptSmokeTests(unittest.TestCase):
         self.assertIn("install python-tk@3.13", log_text)
         self.assertIn("Подготовка окна установщика", result.stdout)
 
+    def test_bootstrap_finds_absolute_python_candidate_outside_path(self) -> None:
+        hidden_dir = self.root / "hidden-python"
+        hidden_dir.mkdir()
+        fake_python = hidden_dir / "python3.13"
+        fake_python.write_text("#!/bin/sh\nexit 0\n", "utf-8")
+        os.chmod(fake_python, 0o755)
+
+        result = subprocess.run(
+            ["/bin/zsh", str(self.script)],
+            cwd=self.root,
+            env={
+                **os.environ,
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "SECOND_LANE_INSTALLER_BOOTSTRAP_CHECK_ONLY": "1",
+                "SECOND_LANE_INSTALLER_FORCE_BOOTSTRAP": "1",
+                "SECOND_LANE_INSTALLER_TEST_SKIP_ABSOLUTE_PYTHON": "1",
+                "SECOND_LANE_INSTALLER_TEST_ABSOLUTE_PYTHON_CANDIDATE": str(fake_python),
+            },
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Подходящий Python для GUI найден", result.stdout)
+
+    def test_bootstrap_exports_homebrew_paths_for_finder_launches(self) -> None:
+        script_text = self.script.read_text("utf-8")
+        self.assertIn('export PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"', script_text)
+        self.assertIn('INSTALLER_PY="$SCRIPT_DIR/second_lane_installer.py"', script_text)
+        self.assertIn('exec "$PY_BIN" "$INSTALLER_PY"', script_text)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -2,7 +2,12 @@
 
 set -u
 
-cd "$(dirname "$0")" || exit 1
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)" || exit 1
+INSTALLER_PY="$SCRIPT_DIR/second_lane_installer.py"
+
+export PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+cd "$SCRIPT_DIR" || exit 1
 
 if [[ "${SECOND_LANE_INSTALLER_FORCE_BOOTSTRAP:-}" != "1" ]]; then
   for PY_BIN in python3.13 python3; do
@@ -18,7 +23,7 @@ PY
           printf "• Подходящий Python для GUI найден: %s\n" "$PY_BIN"
           exit 0
         fi
-        exec "$PY_BIN" second_lane_installer.py
+        exec "$PY_BIN" "$INSTALLER_PY"
       fi
     fi
   done
@@ -61,6 +66,9 @@ check_internet_or_stop() {
 
 python_with_tkinter() {
   local CANDIDATES=(python3.13 python3)
+  if [[ -n "${SECOND_LANE_INSTALLER_TEST_ABSOLUTE_PYTHON_CANDIDATE:-}" ]]; then
+    CANDIDATES=("${SECOND_LANE_INSTALLER_TEST_ABSOLUTE_PYTHON_CANDIDATE}" "${CANDIDATES[@]}")
+  fi
   if [[ "${SECOND_LANE_INSTALLER_TEST_SKIP_ABSOLUTE_PYTHON:-}" != "1" ]]; then
     CANDIDATES+=(/opt/homebrew/bin/python3.13 /usr/local/bin/python3.13)
   fi
@@ -87,7 +95,7 @@ launch_gui_if_possible() {
       say_info "Подходящий Python для GUI найден: $PY_BIN"
       exit 0
     fi
-    exec "$PY_BIN" second_lane_installer.py
+    exec "$PY_BIN" "$INSTALLER_PY"
   fi
 }
 
@@ -150,6 +158,14 @@ if [[ -z "$BREW_BIN" ]]; then
   BREW_BIN="$(find_brew || true)"
 fi
 
+if [[ -n "$BREW_BIN" ]]; then
+  if [[ "$BREW_BIN" == /opt/homebrew/bin/brew ]]; then
+    eval "$("$BREW_BIN" shellenv)"
+  elif [[ "$BREW_BIN" == /usr/local/bin/brew ]]; then
+    eval "$("$BREW_BIN" shellenv)"
+  fi
+fi
+
 if [[ -z "$BREW_BIN" ]]; then
   say_step "Нужна ручная помощь"
   say_info "Homebrew не появился после установки."
@@ -168,13 +184,13 @@ if ! python_with_tkinter >/dev/null 2>&1; then
   install_python_tk_313 "$BREW_BIN"
 fi
 
+launch_gui_if_possible
+
 if [[ "${SECOND_LANE_INSTALLER_BOOTSTRAP_CHECK_ONLY:-}" == "1" ]]; then
   say_step "Bootstrap self-check"
   say_info "Проверка bootstrap-сценария завершена без запуска GUI."
   exit 0
 fi
-
-launch_gui_if_possible
 
 say_step "Не удалось открыть графический мастер"
 say_info "Python установлен, но модуль tkinter всё ещё недоступен."
