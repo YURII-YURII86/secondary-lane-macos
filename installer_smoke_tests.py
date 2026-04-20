@@ -1001,6 +1001,55 @@ class BootstrapScriptSmokeTests(unittest.TestCase):
         self.assertIn('export PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"', script_text)
         self.assertIn('INSTALLER_PY="$SCRIPT_DIR/second_lane_installer.py"', script_text)
         self.assertIn('exec "$PY_BIN" "$INSTALLER_PY"', script_text)
+        self.assertIn('PYTHON_ORG_MACOS_URL="https://www.python.org/downloads/latest/python3.13/"', script_text)
+        self.assertIn("root = tk.Tk()", script_text)
+
+    def test_bootstrap_opens_python_org_when_tkinter_imports_but_gui_crashes(self) -> None:
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        install_log = self.root / "brew.log"
+        fake_curl = bin_dir / "curl"
+        fake_brew = bin_dir / "brew"
+        fake_python = bin_dir / "python3.13"
+        fake_python3 = bin_dir / "python3"
+        fake_curl.write_text("#!/bin/sh\nexit 0\n", "utf-8")
+        fake_brew.write_text(
+            "#!/bin/sh\n"
+            f"echo \"$@\" >> {install_log!s}\n"
+            "exit 0\n",
+            "utf-8",
+        )
+        fake_python.write_text(
+            "#!/bin/sh\n"
+            "payload=$(cat)\n"
+            "printf '%s' \"$payload\" | grep -q 'root = tk.Tk()' && exit 134\n"
+            "printf '%s' \"$payload\" | grep -q 'import tkinter' && exit 0\n"
+            "exit 1\n",
+            "utf-8",
+        )
+        shutil.copyfile(fake_python, fake_python3)
+        for path in (fake_curl, fake_brew, fake_python, fake_python3):
+            os.chmod(path, 0o755)
+
+        result = subprocess.run(
+            ["/bin/zsh", str(self.script)],
+            cwd=self.root,
+            env={
+                **os.environ,
+                "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin",
+                "SECOND_LANE_INSTALLER_FORCE_BOOTSTRAP": "1",
+                "SECOND_LANE_INSTALLER_TEST_SKIP_ABSOLUTE_PYTHON": "1",
+                "SECOND_LANE_INSTALLER_TEST_DISABLE_OPEN": "1",
+            },
+            input="\n",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("Нужен официальный Python для графического окна", result.stdout)
+        self.assertIn("официальный Python installer", result.stdout)
 
 
 if __name__ == "__main__":

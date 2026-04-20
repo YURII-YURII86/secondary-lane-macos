@@ -4,6 +4,7 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)" || exit 1
 INSTALLER_PY="$SCRIPT_DIR/second_lane_installer.py"
+PYTHON_ORG_MACOS_URL="https://www.python.org/downloads/latest/python3.13/"
 
 export PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
@@ -13,7 +14,11 @@ if [[ "${SECOND_LANE_INSTALLER_FORCE_BOOTSTRAP:-}" != "1" ]]; then
   for PY_BIN in python3.13 python3; do
     if command -v "$PY_BIN" >/dev/null 2>&1; then
       if "$PY_BIN" - <<'PY' >/dev/null 2>&1
-import tkinter
+import tkinter as tk
+root = tk.Tk()
+root.withdraw()
+root.update_idletasks()
+root.destroy()
 PY
       then
         if [[ "${SECOND_LANE_INSTALLER_BOOTSTRAP_CHECK_ONLY:-}" == "1" ]]; then
@@ -37,6 +42,14 @@ say_step() {
 
 say_info() {
   printf "• %s\n" "$1"
+}
+
+open_external_url() {
+  local URL="$1"
+  if [[ "${SECOND_LANE_INSTALLER_TEST_DISABLE_OPEN:-}" == "1" ]]; then
+    return 0
+  fi
+  open "$URL"
 }
 
 pause_for_user() {
@@ -64,20 +77,36 @@ check_internet_or_stop() {
   exit 1
 }
 
+python_gui_smoke() {
+  local PY_BIN="$1"
+  "$PY_BIN" - <<'PY' >/dev/null 2>&1
+import tkinter as tk
+root = tk.Tk()
+root.withdraw()
+root.update_idletasks()
+root.destroy()
+PY
+}
+
 python_with_tkinter() {
-  local CANDIDATES=(python3.13 python3)
+  local CANDIDATES=()
   if [[ -n "${SECOND_LANE_INSTALLER_TEST_ABSOLUTE_PYTHON_CANDIDATE:-}" ]]; then
-    CANDIDATES=("${SECOND_LANE_INSTALLER_TEST_ABSOLUTE_PYTHON_CANDIDATE}" "${CANDIDATES[@]}")
+    CANDIDATES+=("${SECOND_LANE_INSTALLER_TEST_ABSOLUTE_PYTHON_CANDIDATE}")
   fi
-  if [[ "${SECOND_LANE_INSTALLER_TEST_SKIP_ABSOLUTE_PYTHON:-}" != "1" ]]; then
-    CANDIDATES+=(/opt/homebrew/bin/python3.13 /usr/local/bin/python3.13)
+  if [[ "${SECOND_LANE_INSTALLER_TEST_SKIP_ABSOLUTE_PYTHON:-}" == "1" ]]; then
+    CANDIDATES+=(python3.13 python3)
+  else
+    CANDIDATES+=(
+      /Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13
+      /usr/local/bin/python3.13
+      python3.13
+      python3
+      /opt/homebrew/bin/python3.13
+    )
   fi
   for PY_BIN in "${CANDIDATES[@]}"; do
     if command -v "$PY_BIN" >/dev/null 2>&1 || [[ -x "$PY_BIN" ]]; then
-      if "$PY_BIN" - <<'PY' >/dev/null 2>&1
-import tkinter
-PY
-      then
+      if python_gui_smoke "$PY_BIN"; then
         printf "%s" "$PY_BIN"
         return 0
       fi
@@ -147,6 +176,17 @@ install_python_tk_313() {
   "$BREW_BIN" install python-tk@3.13
 }
 
+guide_user_to_python_org() {
+  say_step "Нужен официальный Python для графического окна"
+  say_info "На этом Mac графическое окно Python падает ещё до запуска мастера."
+  say_info "Это похоже на проблему некоторых Homebrew-сборок Python с tkinter на macOS."
+  say_info "Сейчас открою официальный Python installer. Пройди обычную установку мышкой, потом вернись сюда и нажми Enter."
+  say_info "Ничего не вводи в Terminal вручную."
+  check_internet_or_stop
+  open_external_url "$PYTHON_ORG_MACOS_URL"
+  pause_for_user
+}
+
 say_step "Second Lane Installer: первый запуск"
 say_info "На этом Mac пока нет подходящего Python для графического окна."
 say_info "Сейчас установщик подготовит основу в этом окне, а потом откроет красивый мастер."
@@ -171,7 +211,7 @@ if [[ -z "$BREW_BIN" ]]; then
   say_info "Homebrew не появился после установки."
   say_info "Не вводи команды вручную. Лучше скопируй этот текст ошибки и покажи тому, кто помогает с установкой."
   say_info "На сайте Homebrew есть справка, но для этого установщика мы не просим тебя самому писать команды."
-  open "https://brew.sh"
+  open_external_url "https://brew.sh"
   pause_for_user
   exit 1
 fi
@@ -184,17 +224,22 @@ if ! python_with_tkinter >/dev/null 2>&1; then
   install_python_tk_313 "$BREW_BIN"
 fi
 
+if ! python_with_tkinter >/dev/null 2>&1; then
+  guide_user_to_python_org
+fi
+
 launch_gui_if_possible
 
-if [[ "${SECOND_LANE_INSTALLER_BOOTSTRAP_CHECK_ONLY:-}" == "1" ]]; then
+if [[ "${SECOND_LANE_INSTALLER_BOOTSTRAP_CHECK_ONLY:-}" == "1" ]] && python_with_tkinter >/dev/null 2>&1; then
   say_step "Bootstrap self-check"
   say_info "Проверка bootstrap-сценария завершена без запуска GUI."
   exit 0
 fi
 
 say_step "Не удалось открыть графический мастер"
-say_info "Python установлен, но модуль tkinter всё ещё недоступен."
-say_info "Закрой это окно и запусти установщик снова. Если ошибка повторится, скопируй текст этого окна и покажи тому, кто помогает с установкой."
+say_info "Python найден, но графическое окно всё ещё не запускается."
+say_info "Если ты уже поставил официальный Python installer, закрой это окно и запусти установщик снова."
+say_info "Если ошибка повторится, скопируй текст этого окна и покажи тому, кто помогает с установкой."
 say_info "Ничего не вводи в Terminal вручную."
 pause_for_user
 exit 1
