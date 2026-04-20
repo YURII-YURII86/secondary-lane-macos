@@ -11,7 +11,7 @@ export PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}:/opt/homebrew/bin:/usr/local
 cd "$SCRIPT_DIR" || exit 1
 
 if [[ "${SECOND_LANE_INSTALLER_FORCE_BOOTSTRAP:-}" != "1" ]]; then
-  for PY_BIN in python3.13 python3; do
+  for PY_BIN in python3.13; do
     if command -v "$PY_BIN" >/dev/null 2>&1; then
       if "$PY_BIN" - <<'PY' >/dev/null 2>&1
 import tkinter as tk
@@ -94,13 +94,12 @@ python_with_tkinter() {
     CANDIDATES+=("${SECOND_LANE_INSTALLER_TEST_ABSOLUTE_PYTHON_CANDIDATE}")
   fi
   if [[ "${SECOND_LANE_INSTALLER_TEST_SKIP_ABSOLUTE_PYTHON:-}" == "1" ]]; then
-    CANDIDATES+=(python3.13 python3)
+    CANDIDATES+=(python3.13)
   else
     CANDIDATES+=(
       /Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13
       /usr/local/bin/python3.13
       python3.13
-      python3
       /opt/homebrew/bin/python3.13
     )
   fi

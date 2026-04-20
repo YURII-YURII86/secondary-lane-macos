@@ -931,8 +931,9 @@ class BootstrapScriptSmokeTests(unittest.TestCase):
             os.chmod(path, 0o755)
 
         result = self.run_script(str(bin_dir))
-        self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn("Bootstrap self-check", result.stdout)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("Подготовка Python 3.13", result.stdout)
+        self.assertIn("Нужен официальный Python для графического окна", result.stdout)
 
     def test_bootstrap_installs_python_tk_when_python_exists_without_tkinter(self) -> None:
         bin_dir = self.root / "bin"
@@ -1003,6 +1004,8 @@ class BootstrapScriptSmokeTests(unittest.TestCase):
         self.assertIn('exec "$PY_BIN" "$INSTALLER_PY"', script_text)
         self.assertIn('PYTHON_ORG_MACOS_URL="https://www.python.org/downloads/latest/python3.13/"', script_text)
         self.assertIn("root = tk.Tk()", script_text)
+        self.assertNotIn("for PY_BIN in python3.13 python3", script_text)
+        self.assertNotIn("python3)", script_text)
 
     def test_bootstrap_opens_python_org_when_tkinter_imports_but_gui_crashes(self) -> None:
         bin_dir = self.root / "bin"
