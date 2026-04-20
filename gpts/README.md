@@ -1,7 +1,4 @@
-# SECOND LANE GPT PACKAGE
-
-Second Lane by **Yurii Slepnev** · Apache-2.0  
-Telegram: https://t.me/yurii_yurii86 · YouTube: https://youtube.com/@yurii_yurii86 · Instagram: https://instagram.com/yurii_yurii86
+# GPTS PACKAGE
 
 В этой папке лежат файлы, которые нужны для сборки и настройки Custom GPT.
 
