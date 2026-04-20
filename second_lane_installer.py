@@ -35,9 +35,10 @@ from ui_brand import (
     PALETTE,
     open_external,
 )
+from runtime_paths import resolve_project_dir
 
 
-PROJECT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = resolve_project_dir(__file__)
 ENV_EXAMPLE_FILE = PROJECT_DIR / ".env.example"
 ENV_FILE = PROJECT_DIR / ".env"
 STATE_FILE = PROJECT_DIR / ".installer_state.json"

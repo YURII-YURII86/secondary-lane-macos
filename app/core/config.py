@@ -11,8 +11,9 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from runtime_paths import resolve_project_dir
 
-PROJECT_DIR = Path(__file__).resolve().parents[2]
+PROJECT_DIR = resolve_project_dir(__file__, parent_levels=2)
 ENV_FILE = PROJECT_DIR / ".env"
 
 WEAK_TOKENS = {

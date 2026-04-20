@@ -15,7 +15,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import gpts_agent_control as gac
+import macos_bundle.bundled_installer_entry as bundled_entry
 import second_lane_installer as sli
+from macos_bundle.payload import sync_payload
 from app.core import config as runtime_config
 
 
@@ -694,6 +696,51 @@ class InstallerSmokeTests(unittest.TestCase):
         app._step_project_env()
         self.assertEqual(app._read_env_value("WORKSPACE_ROOTS"), str(workspace.resolve()))
 
+    def test_runtime_config_respects_project_dir_override(self) -> None:
+        target = self.root / "Bundled Install"
+        target.mkdir()
+        (target / ".env").write_text("AGENT_TOKEN=\n", "utf-8")
+        with patch.dict(os.environ, {"SECOND_LANE_PROJECT_DIR": str(target)}, clear=False):
+            resolved = runtime_config.resolve_project_dir(__file__, parent_levels=0)
+        self.assertEqual(resolved, target.resolve())
+
+    def test_payload_sync_preserves_mutable_runtime_files(self) -> None:
+        source = self.root / "source"
+        target = self.root / "target"
+        source.mkdir()
+        target.mkdir()
+        (source / ".env.example").write_text("A=1\n", "utf-8")
+        (source / "requirements.txt").write_text("fastapi\n", "utf-8")
+        (source / "runtime_paths.py").write_text("x = 1\n", "utf-8")
+        (source / "second_lane_installer.py").write_text("print('ok')\n", "utf-8")
+        (source / "gpts_agent_control.py").write_text("print('ok')\n", "utf-8")
+        (source / "ui_brand.py").write_text("PALETTE = {}\n", "utf-8")
+        (source / "CONNECT_GPT_ACTIONS_RU.md").write_text("guide\n", "utf-8")
+        (source / "README.md").write_text("readme\n", "utf-8")
+        (source / "AUTHORS").write_text("author\n", "utf-8")
+        (source / "CHANGELOG.md").write_text("log\n", "utf-8")
+        (source / "LICENSE").write_text("license\n", "utf-8")
+        (source / "NOTICE").write_text("notice\n", "utf-8")
+        (source / "SECURITY.md").write_text("security\n", "utf-8")
+        (source / "openapi.gpts.yaml").write_text("openapi\n", "utf-8")
+        (source / "Запустить Second Lane.command").write_text("#!/bin/sh\n", "utf-8")
+        app_dir = source / "app"
+        app_dir.mkdir()
+        (app_dir / "__init__.py").write_text("", "utf-8")
+        data_dir = source / "data"
+        data_dir.mkdir()
+        (data_dir / ".keep").write_text("", "utf-8")
+        assets_dir = source / "assets"
+        assets_dir.mkdir()
+        (assets_dir / "logo.txt").write_text("logo\n", "utf-8")
+        (target / ".env").write_text("KEEP=1\n", "utf-8")
+
+        sync_payload(source, target)
+
+        self.assertEqual((target / ".env").read_text("utf-8"), "KEEP=1\n")
+        self.assertTrue((target / "second_lane_installer.py").exists())
+        self.assertTrue((target / "app" / "__init__.py").exists())
+
     def test_generated_agent_tokens_are_cryptographic_shape_and_unique(self) -> None:
         app = make_headless_app()
         tokens = {app._generate_token() for _ in range(100)}
@@ -1053,6 +1100,56 @@ class BootstrapScriptSmokeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("Нужен официальный Python для графического окна", result.stdout)
         self.assertIn("официальный Python installer", result.stdout)
+
+
+class BundledInstallerSmokeTests(unittest.TestCase):
+    def test_bundled_entry_smoke_prepares_install_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload = root / "payload"
+            target = root / "installed"
+            payload.mkdir()
+            (payload / ".env.example").write_text("A=1\n", "utf-8")
+            (payload / "requirements.txt").write_text("fastapi\n", "utf-8")
+            (payload / "runtime_paths.py").write_text("x = 1\n", "utf-8")
+            (payload / "second_lane_installer.py").write_text("print('ok')\n", "utf-8")
+            (payload / "gpts_agent_control.py").write_text("print('ok')\n", "utf-8")
+            (payload / "ui_brand.py").write_text("PALETTE = {}\n", "utf-8")
+            (payload / "CONNECT_GPT_ACTIONS_RU.md").write_text("guide\n", "utf-8")
+            (payload / "README.md").write_text("readme\n", "utf-8")
+            (payload / "AUTHORS").write_text("author\n", "utf-8")
+            (payload / "CHANGELOG.md").write_text("log\n", "utf-8")
+            (payload / "LICENSE").write_text("license\n", "utf-8")
+            (payload / "NOTICE").write_text("notice\n", "utf-8")
+            (payload / "SECURITY.md").write_text("security\n", "utf-8")
+            (payload / "openapi.gpts.yaml").write_text("openapi\n", "utf-8")
+            (payload / "Запустить Second Lane.command").write_text("#!/bin/sh\n", "utf-8")
+            app_dir = payload / "app"
+            app_dir.mkdir()
+            (app_dir / "__init__.py").write_text("", "utf-8")
+            data_dir = payload / "data"
+            data_dir.mkdir()
+            (data_dir / ".keep").write_text("", "utf-8")
+            assets_dir = payload / "assets"
+            assets_dir.mkdir()
+            (assets_dir / "logo.txt").write_text("logo\n", "utf-8")
+            fake_entry = root / "macos_bundle" / "bundled_installer_entry.py"
+            fake_entry.parent.mkdir()
+            fake_entry.write_text("", "utf-8")
+
+            with patch.object(bundled_entry, "__file__", str(fake_entry)):
+                with patch.dict(
+                    os.environ,
+                    {
+                        "SECOND_LANE_INSTALL_TARGET_DIR": str(target),
+                        "SECOND_LANE_BUNDLED_ENTRY_SMOKE": "1",
+                    },
+                    clear=False,
+                ):
+                    bundled_entry.main()
+
+            self.assertTrue((target / ".env.example").exists())
+            self.assertTrue((target / "second_lane_installer.py").exists())
 
 
 if __name__ == "__main__":

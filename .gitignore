@@ -33,3 +33,5 @@ data/*.db
 
 # Temporary local outputs
 .tmp_*
+build/
+dist/
