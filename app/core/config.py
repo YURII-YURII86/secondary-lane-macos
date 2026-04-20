@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,7 +15,34 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 ENV_FILE = PROJECT_DIR / ".env"
 
-WEAK_TOKENS = {"", "change-me", "changeme", "default", "token", "replace-this-with-a-long-random-secret-token"}
+WEAK_TOKENS = {
+    "",
+    "change-me",
+    "changeme",
+    "default",
+    "token",
+    "secret",
+    "password",
+    "example",
+    "replace-this-with-a-long-random-secret-token",
+    "long-random-secret-token-please-use-your-own-value",
+}
+WEAK_TOKEN_WORDS = ("change", "default", "example", "password", "replace", "secret", "token")
+TOKEN_REGEX = re.compile(r"^[0-9a-f]{64}$")
+
+
+def token_is_safe(token: str) -> bool:
+    cleaned = token.strip()
+    lowered = cleaned.lower()
+    if len(cleaned) < 32:
+        return False
+    if lowered in WEAK_TOKENS:
+        return False
+    if len(set(cleaned)) <= 4:
+        return False
+    if any(word in lowered for word in WEAK_TOKEN_WORDS):
+        return False
+    return bool(TOKEN_REGEX.fullmatch(cleaned))
 
 
 def _load_env_file() -> dict[str, str]:
@@ -96,8 +124,8 @@ def load_settings() -> Settings:
 
 
 def validate_runtime_settings(settings: Settings) -> None:
-    if settings.agent_token in WEAK_TOKENS or len(settings.agent_token) < 24:
+    if not token_is_safe(settings.agent_token):
         raise RuntimeError(
             "AGENT_TOKEN не заполнен или выглядит небезопасно.\n"
-            "Откройте файл .env, найдите строку AGENT_TOKEN=... и вставьте длинный случайный токен."
+            "Запустите установщик ещё раз: он создаст длинный случайный ключ сам."
         )

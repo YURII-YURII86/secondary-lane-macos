@@ -18,6 +18,7 @@ import shutil
 import signal
 import ssl
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -25,32 +26,28 @@ import urllib.request
 import json
 from dataclasses import dataclass
 from pathlib import Path
-import datetime
-import platform as _platform
-import tkinter as tk
-from tkinter import BOTH, END, LEFT, Button, Frame, Label, StringVar, Text, Tk
+from tkinter import BOTH, END, LEFT, RIGHT, Button, Frame, Label, StringVar, Text, Tk
+import tkinter.font as tkfont
+from tkinter.scrolledtext import ScrolledText
+
+from app.core.config import token_is_safe
+from ui_brand import (
+    BRAND_AUTHOR,
+    BRAND_CONTROL_BLURB,
+    BRAND_COPYRIGHT,
+    BRAND_LICENSE,
+    BRAND_LINKS,
+    BRAND_NAME,
+    BRAND_PRODUCT,
+    BRAND_TAGLINE,
+    PALETTE,
+    open_external,
+)
 
 try:
     import certifi
 except ImportError:  # pragma: no cover - optional dependency at runtime
     certifi = None
-
-
-# ---------------------------------------------------------------------------
-# UI design tokens — Catppuccin Mocha palette
-# ---------------------------------------------------------------------------
-_C: dict[str, str] = {
-    "base":     "#1e1e2e", "mantle":   "#181825", "crust":    "#11111b",
-    "surface0": "#313244", "surface1": "#45475a", "surface2": "#585b70",
-    "overlay0": "#6c7086", "overlay1": "#7f849c",
-    "text":     "#cdd6f4", "subtext1": "#bac2de", "subtext0": "#a6adc8",
-    "green":    "#a6e3a1", "teal":     "#94e2d5", "blue":     "#89b4fa",
-    "mauve":    "#cba6f7", "lavender": "#b4befe", "yellow":   "#f9e2af",
-    "peach":    "#fab387", "red":      "#f38ba8", "maroon":   "#eba0ac",
-}
-_SYS       = _platform.system()
-_FONT_UI   = "Helvetica Neue" if _SYS == "Darwin" else ("Segoe UI"  if _SYS == "Windows" else "Sans")
-_FONT_MONO = "Menlo"          if _SYS == "Darwin" else ("Consolas"  if _SYS == "Windows" else "Monospace")
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -59,6 +56,7 @@ OPENAPI_FILES = [
     PROJECT_DIR / "openapi.gpts.yaml",
 ]
 DEFAULT_VENV_UVICORN = PROJECT_DIR / ".venv" / "bin" / "uvicorn"
+LOCAL_NGROK_BIN = PROJECT_DIR / "tools" / "ngrok" / "ngrok"
 PYTHON = "python3.13"
 LOCAL_URL = "http://127.0.0.1:8787"
 
@@ -92,7 +90,15 @@ class LocalDaemonProcess:
 class ControlPanel:
     def __init__(self) -> None:
         self.root = Tk()
-        self.root.title("Second Lane Control")
+        self.root.title(f"{BRAND_NAME} Control")
+        self.root.geometry("1120x760")
+        self.root.minsize(980, 680)
+        self.root.configure(bg=PALETTE["app_bg"])
+        self.heading_font = self._native_font("TkDefaultFont", 8, "bold")
+        self.section_font = self._native_font("TkDefaultFont", 4, "bold")
+        self.body_font = self._native_font("TkDefaultFont", 0, "normal")
+        self.small_font = self._native_font("TkDefaultFont", -1, "normal")
+        self.log_font = self._native_font("TkFixedFont", 0, None)
 
         self.agent_proc: subprocess.Popen | None = None
         self.tunnel_proc: subprocess.Popen | None = None
@@ -113,242 +119,120 @@ class ControlPanel:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self._poll_status()
 
+    def _native_font(self, font_name: str, size_delta: int, weight: str | None) -> tuple[str, int, str]:
+        base = tkfont.nametofont(font_name)
+        family = str(base.actual("family"))
+        size = int(base.actual("size")) + size_delta
+        resolved_weight = str(weight or base.actual("weight"))
+        return (family, max(size, 10), resolved_weight)
+
     # --- UI ---
 
     def _build_ui(self) -> None:
-        # ── Window ──────────────────────────────────────────────────────
-        self.root.configure(bg=_C["base"])
-        self.root.geometry("940x660")
-        self.root.minsize(800, 540)
+        shell = Frame(self.root, bg=PALETTE["app_bg"], padx=18, pady=18)
+        shell.pack(fill=BOTH, expand=True)
 
-        # ── Header bar ──────────────────────────────────────────────────
-        hdr = tk.Frame(self.root, bg=_C["mantle"], height=54)
-        hdr.pack(fill=tk.X, side=tk.TOP)
-        hdr.pack_propagate(False)
-        tk.Label(
-            hdr,
-            text="● Second Lane Control",
-            font=(_FONT_UI, 16, "bold"),
-            bg=_C["mantle"], fg=_C["mauve"],
-        ).pack(side=tk.LEFT, padx=20, pady=14)
-        tk.Label(
-            hdr,
-            text="by Yurii Slepnev",
-            font=(_FONT_UI, 10),
-            bg=_C["mantle"], fg=_C["overlay1"],
-        ).pack(side=tk.RIGHT, padx=20)
+        hero = Frame(shell, bg=PALETTE["surface"], highlightbackground=PALETTE["border"], highlightthickness=1, padx=20, pady=18)
+        hero.pack(fill="x", pady=(0, 14))
+        left = Frame(hero, bg=PALETTE["surface"])
+        left.pack(side=LEFT, fill="x", expand=True)
+        Label(left, text=f"{BRAND_NAME} Control", font=self.heading_font, bg=PALETTE["surface"], fg=PALETTE["text"]).pack(anchor="w")
+        Label(left, text=BRAND_CONTROL_BLURB, font=self.body_font, bg=PALETTE["surface"], fg=PALETTE["muted"], wraplength=760, justify=LEFT).pack(anchor="w", pady=(8, 0))
+        status_strip = Frame(left, bg=PALETTE["surface"])
+        status_strip.pack(anchor="w", pady=(12, 0))
+        self._make_status_chip(status_strip, "Локальный демон", self.agent_status, PALETTE["panel"], PALETTE["text"]).pack(side=LEFT, padx=(0, 10))
+        self._make_status_chip(status_strip, "Публичный адрес", self.tunnel_url, PALETTE["panel"], PALETTE["text"]).pack(side=LEFT)
 
-        # ── Status section ───────────────────────────────────────────────
-        sx = tk.Frame(self.root, bg=_C["base"])
-        sx.pack(fill=tk.X, padx=14, pady=(10, 0))
+        controls = Frame(shell, bg=PALETTE["surface"], highlightbackground=PALETTE["border"], highlightthickness=1, padx=16, pady=14)
+        controls.pack(fill="x")
 
-        # Daemon row
-        dr = tk.Frame(sx, bg=_C["surface0"], padx=14, pady=9)
-        dr.pack(fill=tk.X, pady=(0, 3))
-        self._daemon_dot = tk.Label(
-            dr, text="●", font=(_FONT_UI, 15),
-            bg=_C["surface0"], fg=_C["overlay0"],
-        )
-        self._daemon_dot.pack(side=tk.LEFT, padx=(0, 10))
-        tk.Label(
-            dr, text="ДЕМОН", font=(_FONT_UI, 8, "bold"),
-            bg=_C["surface0"], fg=_C["overlay1"], width=8, anchor="w",
-        ).pack(side=tk.LEFT)
-        tk.Label(
-            dr, textvariable=self.agent_status, font=(_FONT_UI, 11),
-            bg=_C["surface0"], fg=_C["subtext1"], anchor="w", wraplength=620,
-        ).pack(side=tk.LEFT, padx=10, fill=tk.X, expand=True)
+        row_top = Frame(controls, bg=PALETTE["surface"])
+        row_top.pack(anchor="w", pady=(0, 10))
+        row_bottom = Frame(controls, bg=PALETTE["surface"])
+        row_bottom.pack(anchor="w")
 
-        # Tunnel row
-        tr = tk.Frame(sx, bg=_C["surface0"], padx=14, pady=9)
-        tr.pack(fill=tk.X)
-        self._tunnel_dot = tk.Label(
-            tr, text="●", font=(_FONT_UI, 15),
-            bg=_C["surface0"], fg=_C["overlay0"],
-        )
-        self._tunnel_dot.pack(side=tk.LEFT, padx=(0, 10))
-        tk.Label(
-            tr, text="ТУННЕЛЬ", font=(_FONT_UI, 8, "bold"),
-            bg=_C["surface0"], fg=_C["overlay1"], width=8, anchor="w",
-        ).pack(side=tk.LEFT)
-        # Pack copy button on the RIGHT before the URL label so it stays right-aligned
-        tk.Button(
-            tr, text="Скопировать URL", font=(_FONT_UI, 9),
-            bg=_C["surface1"], fg=_C["subtext0"],
-            activebackground=_C["surface2"], activeforeground=_C["text"],
-            relief="flat", bd=0, padx=10, pady=3, cursor="hand2",
-            command=self.copy_url,
-        ).pack(side=tk.RIGHT, padx=(6, 0))
-        tk.Label(
-            tr, textvariable=self.tunnel_url, font=(_FONT_UI, 11),
-            bg=_C["surface0"], fg=_C["teal"], anchor="w", wraplength=500,
-        ).pack(side=tk.LEFT, padx=10, fill=tk.X, expand=True)
+        self._make_action_button(row_top, "Запустить", self.start_all, PALETTE["accent"], PALETTE["surface"]).pack(side=LEFT, padx=8)
+        self._make_action_button(row_top, "Перезапустить демон", self.restart_daemon, PALETTE["accent_soft"], PALETTE["accent_deep"]).pack(side=LEFT, padx=8)
+        self._make_action_button(row_top, "Выключить", self.stop_all, PALETTE["surface"], PALETTE["text"], border=True).pack(side=LEFT, padx=8)
 
-        # Colour traces for status indicator dots
-        self.agent_status.trace_add("write", self._update_daemon_dot)
-        self.tunnel_url.trace_add("write", self._update_tunnel_dot)
+        self._make_action_button(row_bottom, "Скопировать URL", self.copy_url, PALETTE["surface"], PALETTE["text"], border=True).pack(side=LEFT, padx=8)
+        self._make_action_button(row_bottom, "Проверить", self.check_now, PALETTE["surface"], PALETTE["text"], border=True).pack(side=LEFT, padx=8)
+        self._make_action_button(row_bottom, "Открыть .env", self.open_env_file, PALETTE["surface"], PALETTE["text"], border=True).pack(side=LEFT, padx=8)
 
-        # ── Action buttons ────────────────────────────────────────────────
-        btn = tk.Frame(self.root, bg=_C["base"])
-        btn.pack(fill=tk.X, padx=14, pady=10)
-        _p = dict(
-            font=(_FONT_UI, 12, "bold"),
-            bg=_C["mauve"], fg=_C["crust"],
-            activebackground=_C["lavender"], activeforeground=_C["crust"],
-            relief="flat", bd=0, padx=22, pady=10, cursor="hand2",
-        )
-        _s = dict(
-            font=(_FONT_UI, 11),
-            bg=_C["surface0"], fg=_C["text"],
-            activebackground=_C["surface1"], activeforeground=_C["text"],
-            relief="flat", bd=0, padx=18, pady=10, cursor="hand2",
-        )
-        _d = dict(
-            font=(_FONT_UI, 11),
-            bg=_C["surface0"], fg=_C["red"],
-            activebackground=_C["surface1"], activeforeground=_C["maroon"],
-            relief="flat", bd=0, padx=18, pady=10, cursor="hand2",
-        )
-        tk.Button(btn, text="▶  Запустить",     **_p, command=self.start_all).pack(side=tk.LEFT, padx=(0, 6))
-        tk.Button(btn, text="↺  Перезапустить", **_s, command=self.restart_daemon).pack(side=tk.LEFT, padx=(0, 6))
-        tk.Button(btn, text="■  Выключить",      **_d, command=self.stop_all).pack(side=tk.LEFT, padx=(0, 28))
-        tk.Button(btn, text="✓  Проверить",      **_s, command=self.check_now).pack(side=tk.LEFT, padx=(0, 6))
-        tk.Button(btn, text="⚙  Открыть .env",  **_s, command=self.open_env_file).pack(side=tk.LEFT, padx=(0, 6))
-        tk.Button(btn, text="Файлы GPT",         **_s, command=self.open_project_folder).pack(side=tk.LEFT)
+        log_wrap = Frame(shell, bg=PALETTE["surface"], highlightbackground=PALETTE["border"], highlightthickness=1, padx=16, pady=14)
+        log_wrap.pack(fill=BOTH, expand=True, pady=(14, 0))
+        top_row = Frame(log_wrap, bg=PALETTE["surface"])
+        top_row.pack(fill="x", pady=(0, 8))
+        Label(top_row, text="Живой журнал работы", font=self.section_font, bg=PALETTE["surface"], fg=PALETTE["text"]).pack(side=LEFT)
+        Button(
+            top_row,
+            text="Скопировать лог",
+            command=self.copy_log,
+            font=self.body_font,
+            padx=10,
+            pady=3,
+        ).pack(side=RIGHT)
 
-        # ── Log console ───────────────────────────────────────────────────
-        lhdr = tk.Frame(self.root, bg=_C["mantle"])
-        lhdr.pack(fill=tk.X, padx=14)
-        tk.Label(
-            lhdr, text="ЖУРНАЛ СОБЫТИЙ", font=(_FONT_UI, 8, "bold"),
-            bg=_C["mantle"], fg=_C["overlay0"], padx=12, pady=5,
-        ).pack(side=tk.LEFT)
-        tk.Button(
-            lhdr, text="Очистить", font=(_FONT_UI, 8),
-            bg=_C["mantle"], fg=_C["overlay1"],
-            activebackground=_C["surface0"], activeforeground=_C["text"],
-            relief="flat", bd=0, padx=10, pady=4, cursor="hand2",
-            command=lambda: self.log.delete("1.0", END),
-        ).pack(side=tk.RIGHT, padx=4)
-
-        lbox = tk.Frame(self.root, bg=_C["crust"])
-        lbox.pack(fill=BOTH, expand=True, padx=14, pady=(0, 14))
-        vsb = tk.Scrollbar(lbox, bg=_C["surface0"], troughcolor=_C["crust"],
-                           activebackground=_C["surface1"])
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.log = Text(
-            lbox,
+        self.log = ScrolledText(
+            log_wrap,
+            height=20,
             wrap="word",
-            bg=_C["crust"], fg=_C["text"],
-            font=(_FONT_MONO, 11),
-            insertbackground=_C["text"],
-            selectbackground=_C["surface1"],
-            selectforeground=_C["text"],
-            relief="flat", bd=0,
-            padx=14, pady=8,
-            yscrollcommand=vsb.set,
+            font=self.log_font,
+            bg=PALETTE["panel"],
+            fg=PALETTE["text"],
+            relief="flat",
+            borderwidth=0,
+            insertbackground=PALETTE["text"],
         )
-        self.log.pack(side=tk.LEFT, fill=BOTH, expand=True)
-        vsb.config(command=self.log.yview)
+        self.log.pack(fill=BOTH, expand=True)
+        self.log.configure(highlightthickness=1, highlightbackground=PALETTE["border"], highlightcolor=PALETTE["accent"])
+        self.write_log(
+            f"{BRAND_NAME} by {BRAND_AUTHOR}\n"
+            f"{BRAND_TAGLINE}\n\n"
+            "Открой это окно и нажми «Запустить». Потом импортируй openapi.gpts.yaml в GPT Actions.\n"
+        )
 
-        # Log colour tags
-        self.log.tag_config("ts",     foreground=_C["overlay0"])
-        self.log.tag_config("info",   foreground=_C["subtext0"])
-        self.log.tag_config("ok",     foreground=_C["green"])
-        self.log.tag_config("warn",   foreground=_C["peach"])
-        self.log.tag_config("error",  foreground=_C["red"])
-        self.log.tag_config("ngrok",  foreground=_C["blue"])
-        self.log.tag_config("agent",  foreground=_C["mauve"])
-        self.log.tag_config("action", foreground=_C["yellow"])
-        self.log.tag_config("url",    foreground=_C["teal"])
-        self.log.tag_config("dim",    foreground=_C["overlay0"])
-        self.log.tag_config("hdr",    foreground=_C["mauve"],
-                            font=(_FONT_MONO, 12, "bold"))
-        self._write_log_header()
+        footer = Frame(shell, bg=PALETTE["app_bg"])
+        footer.pack(fill="x", pady=(10, 0))
+        Label(footer, text=f"{BRAND_COPYRIGHT} · {BRAND_LICENSE}", font=self.small_font, bg=PALETTE["app_bg"], fg=PALETTE["muted"]).pack(side=LEFT)
+        links = Frame(footer, bg=PALETTE["app_bg"])
+        links.pack(side=RIGHT)
+        for link in BRAND_LINKS:
+            Button(
+                links,
+                text=link.label,
+                command=lambda url=link.url: open_external(url),
+                relief="flat",
+                bd=0,
+                cursor="hand2",
+                font=self.small_font,
+                bg=PALETTE["app_bg"],
+                fg=PALETTE["muted"],
+                activebackground=PALETTE["app_bg"],
+                activeforeground=PALETTE["text"],
+                padx=4,
+                pady=2,
+            ).pack(side=LEFT, padx=(8, 0))
+
+    def _make_action_button(self, parent: Frame, text: str, command, bg: str, fg: str, border: bool = False) -> Button:
+        return Button(
+            parent,
+            text=text,
+            command=command,
+            font=self.body_font,
+            padx=12,
+            pady=4,
+        )
+
+    def _make_status_chip(self, parent: Frame, title: str, textvariable: StringVar, bg: str, fg: str) -> Frame:
+        card = Frame(parent, bg=bg, padx=10, pady=8, highlightbackground=PALETTE["border"], highlightthickness=1)
+        Label(card, text=title, font=self.small_font, bg=bg, fg=PALETTE["muted"]).pack(anchor="w")
+        Label(card, textvariable=textvariable, font=self.small_font, bg=bg, fg=fg, wraplength=250, justify=LEFT).pack(anchor="w", pady=(4, 0))
+        return card
 
     def write_log(self, text: str) -> None:
-        if not text:
-            return
-        now = datetime.datetime.now().strftime("%H:%M:%S")
-        for line in text.rstrip("\n").split("\n"):
-            self.log.insert(END, f"{now}  ", "ts")
-            self.log.insert(END, line + "\n", self._log_tag(line))
+        self.log.insert(END, text)
         self.log.see(END)
-
-    def _write_log_header(self) -> None:
-        self.log.insert(END, "\n  Second Lane by Yurii Slepnev\n", "hdr")
-        sep = "  " + "─" * 46 + "\n"
-        self.log.insert(END, sep, "dim")
-        for lbl, url in (
-            ("  Telegram: ", "https://t.me/yurii_yurii86"),
-            ("  YouTube:  ", "https://youtube.com/@yurii_yurii86"),
-            ("  Instagram:", "https://instagram.com/yurii_yurii86"),
-        ):
-            self.log.insert(END, lbl, "dim")
-            self.log.insert(END, url + "\n", "url")
-        self.log.insert(END, "  Licensed under Apache-2.0\n", "dim")
-        self.log.insert(END, sep, "dim")
-        now = datetime.datetime.now().strftime("%H:%M:%S")
-        self.log.insert(END, f"\n{now}  ", "ts")
-        self.log.insert(END, "Панель готова — нажми «Запустить».\n", "info")
-        self.log.see(END)
-
-    def _log_tag(self, line: str) -> str:
-        low = line.lower()
-        if line.startswith("[ngrok]"):
-            return "ngrok"
-        if line.startswith("[agent]"):
-            return "agent"
-        if any(k in low for k in (
-            "ok ✓", "туннель активен", "url вставлен", "готов",
-            "скопировал", "автопроверка туннеля: ok", "снова отвечает",
-            "работает", "уже запущен", "активен",
-        )):
-            return "ok"
-        if any(k in low for k in (
-            "ошибка", "упал", "не смог", "заблокировал", "err_ngrok",
-            "не найден", "не поднялся", "неизвестн", "невалид",
-        )):
-            return "error"
-        if any(k in low for k in (
-            "восстановление", "попыт", "проверка публичного", "предупрежд",
-        )):
-            return "warn"
-        if any(k in low for k in (
-            "запускаю", "поднимаю", "останавливаю", "перезапуск", "создаю",
-        )):
-            return "action"
-        if "https://" in line or "http://" in line:
-            return "url"
-        return "info"
-
-    def _update_daemon_dot(self, *_: object) -> None:
-        val = self.agent_status.get().lower()
-        if "работает" in val or "уже запущен" in val:
-            color = _C["green"]
-        elif "перезапуск" in val:
-            color = _C["peach"]
-        else:
-            color = _C["overlay0"]
-        try:
-            self._daemon_dot.configure(fg=color)
-        except Exception:
-            pass
-
-    def _update_tunnel_dot(self, *_: object) -> None:
-        val = self.tunnel_url.get().lower()
-        if "https://" in val:
-            color = _C["green"]
-        elif "восстановление" in val:
-            color = _C["peach"]
-        elif any(k in val for k in ("ошибка", "упал", "заблокировал")):
-            color = _C["red"]
-        else:
-            color = _C["overlay0"]
-        try:
-            self._tunnel_dot.configure(fg=color)
-        except Exception:
-            pass
 
     # --- Env / config ---
 
@@ -363,16 +247,15 @@ class ControlPanel:
                 env[key.strip()] = value.strip()
         env["ENABLED_PROVIDER_MANIFESTS"] = str(PROJECT_DIR / "app" / "providers")
         env["STATE_DB_PATH"] = str(PROJECT_DIR / "data" / "agent.db")
-        env.setdefault("WORKSPACE_ROOTS", str(PROJECT_DIR))
+        default_workspace = f"{Path.home() / 'Documents'}:/workspace:/projects"
+        env.setdefault("WORKSPACE_ROOTS", default_workspace)
         return env
 
     def agent_token(self) -> str:
         return self.load_env().get("AGENT_TOKEN", "")
 
     def agent_token_is_safe(self) -> bool:
-        token = self.agent_token().strip()
-        weak_tokens = {"", "change-me", "changeme", "default", "token"}
-        return token not in weak_tokens
+        return token_is_safe(self.agent_token())
 
     def explain_unsafe_token(self) -> None:
         self.write_log(
@@ -382,15 +265,13 @@ class ControlPanel:
             "- если оставить пустое значение или что-то вроде change-me, защиту легко угадать;\n"
             "- поэтому запуск сейчас специально остановлен.\n\n"
             "Что сделать:\n"
-            f"1. Открой файл {ENV_FILE}\n"
-            "2. Найди строку AGENT_TOKEN=...\n"
-            "3. Вставь после = длинный случайный набор символов\n"
-            "4. Сохрани файл\n"
-            "5. Снова нажми «Запустить»\n\n"
-            "Пример хорошего токена:\n"
-            "AGENT_TOKEN=long-random-secret-token-please-use-your-own-value\n\n"
+            "1. Закрой эту панель.\n"
+            "2. Запусти файл «Установить Second Lane.command».\n"
+            "3. Установщик сам создаст безопасный ключ и сохранит его в файл настроек.\n"
+            "4. После этого снова нажми «Запустить Second Lane».\n\n"
             "Важно:\n"
-            "- не используй change-me, default, token;\n"
+            "- не придумывай ключ вручную;\n"
+            "- ничего не вставляй в Terminal;\n"
             "- не публикуй этот токен в скриншотах и сообщениях.\n"
         )
 
@@ -451,28 +332,16 @@ class ControlPanel:
             return "временный сетевой сбой при подключении к ngrok."
         return failure.summary
 
-    def _find_ngrok(self) -> str | None:
-        """Return full path to ngrok, checking PATH and Homebrew locations."""
-        found = shutil.which("ngrok")
-        if found:
-            return found
-        # Homebrew: Apple Silicon (/opt/homebrew) and Intel (/usr/local)
-        for p in ("/opt/homebrew/bin/ngrok", "/usr/local/bin/ngrok"):
-            if Path(p).exists():
-                self.write_log(f"ngrok найден вне PATH: {p}\n")
-                return p
-        return None
-
     def _preflight_tunnel_check(self) -> tuple[bool, str]:
-        ngrok_path = self._find_ngrok()
-        if not ngrok_path:
-            return False, "ngrok не найден. Установи: brew install ngrok/ngrok/ngrok"
+        ngrok_bin = self.ngrok_bin()
+        if not ngrok_bin:
+            return False, "ngrok не найден. Запусти установщик Second Lane ещё раз, он сам докачает ngrok."
         domain = self.ngrok_domain().strip()
         if not domain:
             return False, "в .env не задан NGROK_DOMAIN"
         try:
             result = subprocess.run(
-                [ngrok_path, "config", "check"],
+                [ngrok_bin, "config", "check"],
                 cwd=PROJECT_DIR,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -488,6 +357,11 @@ class ControlPanel:
             return False, "локальный демон не отвечает на /health"
         return True, "OK"
 
+    def ngrok_bin(self) -> str | None:
+        if LOCAL_NGROK_BIN.exists():
+            return str(LOCAL_NGROK_BIN)
+        return shutil.which("ngrok")
+
     # --- Python env ---
 
     def uvicorn_bin(self) -> Path:
@@ -502,31 +376,15 @@ class ControlPanel:
                 "Python 3.14 для этого pinned stack не считается поддержанным.\n"
             )
             return False
-        self.write_log("Не нашёл готовый uvicorn. Создаю окружение через python3.13...\n")
+        self.write_log("Не нашёл готовый uvicorn. Создаю окружение и ставлю зависимости через python3.13...\n")
         try:
             uvicorn_bin = self.uvicorn_bin()
-            venv_result = subprocess.run(
-                [PYTHON, "-m", "venv", str(uvicorn_bin.parent.parent)],
+            subprocess.run([PYTHON, "-m", "venv", str(uvicorn_bin.parent.parent)], cwd=PROJECT_DIR, check=True)
+            subprocess.run(
+                [str(uvicorn_bin.parent / "pip"), "install", "-r", str(PROJECT_DIR / "requirements.txt")],
                 cwd=PROJECT_DIR,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, timeout=60,
+                check=True,
             )
-            if venv_result.returncode != 0:
-                self.write_log(f"venv не создался:\n{venv_result.stdout or ''}\n")
-                return False
-            self.write_log("Виртуальное окружение создано. Устанавливаю зависимости...\n")
-            pip_proc = subprocess.Popen(
-                [str(uvicorn_bin.parent / "pip"), "install", "--quiet", "-r", str(PROJECT_DIR / "requirements.txt")],
-                cwd=PROJECT_DIR,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True,
-            )
-            threading.Thread(target=self._stream_process, args=(pip_proc, "pip"), daemon=True).start()
-            pip_proc.wait()
-            if pip_proc.returncode != 0:
-                self.write_log("pip install завершился с ошибкой — проверь лог выше.\n")
-                return False
-            self.write_log("Зависимости установлены.\n")
             return True
         except Exception as exc:
             self.write_log(f"Не смог подготовить Python-окружение через {PYTHON}: {exc}\n")
@@ -767,10 +625,13 @@ class ControlPanel:
         self._tunnel_blocked_reason = None
         self._last_tunnel_failure = None
         self.write_log(f"Запускаю ngrok туннель → {public_url} ...\n")
+        ngrok_bin = self.ngrok_bin()
+        if not ngrok_bin:
+            self.write_log("Не запускаю туннель: ngrok не найден. Запусти установщик Second Lane ещё раз.\n")
+            return
 
-        ngrok_cmd = self._find_ngrok() or "ngrok"
         self.tunnel_proc = subprocess.Popen(
-            [ngrok_cmd, "http", "8787", f"--url={domain}", "--log=stdout", "--log-format=logfmt"],
+            [ngrok_bin, "http", "8787", f"--url={domain}", "--log=stdout", "--log-format=logfmt"],
             cwd=PROJECT_DIR,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -1066,32 +927,11 @@ class ControlPanel:
         self.root.clipboard_append(self.last_url)
         self.write_log(f"Скопировал URL: {self.last_url}\n")
 
-    def open_project_folder(self) -> None:
-        """Open the project folder in Finder and log which files to use for GPT setup."""
-        try:
-            if shutil.which("open"):
-                subprocess.Popen(["open", str(PROJECT_DIR)])
-            else:
-                subprocess.Popen(["xdg-open", str(PROJECT_DIR)])
-        except Exception as exc:
-            self.write_log(f"Не смог открыть папку: {exc}\n")
-            return
-        openapi = PROJECT_DIR / "openapi.gpts.yaml"
-        instructions = PROJECT_DIR / "gpts" / "system_instructions.txt"
-        knowledge_dir = PROJECT_DIR / "gpts" / "knowledge"
-        token = self.agent_token()
-        token_hint = f"{token[:6]}...{token[-4:]}" if len(token) > 12 else "(не задан)"
-        self.write_log(
-            f"Открыл папку: {PROJECT_DIR}\n"
-            "\nФайлы для настройки GPT в ChatGPT:\n"
-            f"  Instructions → {instructions.name}  "
-            f"({'есть' if instructions.exists() else 'НЕТ'})\n"
-            f"  Knowledge    → папка {knowledge_dir.name}/  "
-            f"({'есть' if knowledge_dir.exists() else 'НЕТ'})\n"
-            f"  Actions      → {openapi.name}  "
-            f"({'есть' if openapi.exists() else 'НЕТ'})\n"
-            f"  Auth Bearer  → AGENT_TOKEN = {token_hint}\n"
-        )
+    def copy_log(self) -> None:
+        data = self.log.get("1.0", END).strip()
+        self.root.clipboard_clear()
+        self.root.clipboard_append(data)
+        self.write_log("Скопировал журнал в буфер обмена.\n")
 
     def open_env_file(self) -> None:
         if not ENV_FILE.exists():
@@ -1124,4 +964,7 @@ class ControlPanel:
 
 
 if __name__ == "__main__":
-    ControlPanel().run()
+    panel = ControlPanel()
+    if "--auto-start" in sys.argv or os.environ.get("SECOND_LANE_AUTO_START") == "1":
+        panel.root.after(500, panel.start_all)
+    panel.run()
