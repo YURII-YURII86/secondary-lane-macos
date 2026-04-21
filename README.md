@@ -148,7 +148,7 @@ Second Lane построен вокруг другой идеи:
 
 - daemon поднимается локально на `127.0.0.1:8787`;
 - `ngrok` публикует текущий daemon наружу;
-- `openapi.gpts.yaml` импортируется в GPT Actions;
+- `openapi.gpts.yaml` импортируется в GPT Actions после того, как панель подставила живой URL туннеля;
 - GPT может вызывать curated actions для работы с проектом;
 - `.ai_context/` хранит долговечную память между сессиями;
 - локальные verify и smoke-check сценарии проходят в текущем проекте.
@@ -159,7 +159,9 @@ Second Lane построен вокруг другой идеи:
 
 - `openapi.gpts.yaml` — curated compact schema для GPT Actions.
 
-Именно её нужно импортировать в GPT Actions и держать синхронизированной с актуальным GPT-facing action-set.
+Именно её нужно импортировать в GPT Actions после строки `Туннель активен` в панели Second Lane Control.
+
+Если импортировать файл прямо из GitHub до запуска панели, внутри будет учебный адрес `your-domain.ngrok-free.dev`. GPT запомнит этот адрес, и Actions будут долго ждать ответ от несуществующего сервера.
 
 ### Самые сильные workflow actions в GPT schema
 
@@ -209,11 +211,14 @@ python3.13 -m venv .venv
 
 ### Как подключить GPT
 
-1. Импортируй `openapi.gpts.yaml` в GPT Actions.
-2. Укажи bearer token из `.env`.
-3. Вставь `gpts/system_instructions.txt` в instructions GPT.
-4. Загрузи `gpts/knowledge/` в knowledge GPT.
-5. Проверь первые вызовы `getCapabilities`, `inspectProject`, `runTest`.
+1. Запусти панель Second Lane Control.
+2. Дождись строки `Туннель активен`.
+3. Убедись, что в журнале написано: URL обновлён в `openapi.gpts.yaml`.
+4. Импортируй `openapi.gpts.yaml` в GPT Actions.
+5. Укажи bearer token из `.env`.
+6. Вставь `gpts/system_instructions.txt` в instructions GPT.
+7. Загрузи `gpts/knowledge/` в knowledge GPT.
+8. Проверь первые вызовы `getCapabilities`, `inspectProject`, `runTest`.
 
 ### Локальная проверка
 

@@ -724,6 +724,12 @@ class InstallerSmokeTests(unittest.TestCase):
         (source / "SECURITY.md").write_text("security\n", "utf-8")
         (source / "openapi.gpts.yaml").write_text("openapi\n", "utf-8")
         (source / "Запустить Second Lane.command").write_text("#!/bin/sh\n", "utf-8")
+        gpts_dir = source / "gpts"
+        gpts_dir.mkdir()
+        (gpts_dir / "system_instructions.txt").write_text("instructions\n", "utf-8")
+        knowledge_dir = gpts_dir / "knowledge"
+        knowledge_dir.mkdir()
+        (knowledge_dir / "guide.md").write_text("guide\n", "utf-8")
         app_dir = source / "app"
         app_dir.mkdir()
         (app_dir / "__init__.py").write_text("", "utf-8")
@@ -734,12 +740,16 @@ class InstallerSmokeTests(unittest.TestCase):
         assets_dir.mkdir()
         (assets_dir / "logo.txt").write_text("logo\n", "utf-8")
         (target / ".env").write_text("KEEP=1\n", "utf-8")
+        (target / "openapi.gpts.yaml").write_text("live-url\n", "utf-8")
 
         sync_payload(source, target)
 
         self.assertEqual((target / ".env").read_text("utf-8"), "KEEP=1\n")
+        self.assertEqual((target / "openapi.gpts.yaml").read_text("utf-8"), "live-url\n")
         self.assertTrue((target / "second_lane_installer.py").exists())
         self.assertTrue((target / "app" / "__init__.py").exists())
+        self.assertTrue((target / "gpts" / "system_instructions.txt").exists())
+        self.assertTrue((target / "gpts" / "knowledge" / "guide.md").exists())
 
     def test_generated_agent_tokens_are_cryptographic_shape_and_unique(self) -> None:
         app = make_headless_app()
@@ -1124,6 +1134,12 @@ class BundledInstallerSmokeTests(unittest.TestCase):
             (payload / "SECURITY.md").write_text("security\n", "utf-8")
             (payload / "openapi.gpts.yaml").write_text("openapi\n", "utf-8")
             (payload / "Запустить Second Lane.command").write_text("#!/bin/sh\n", "utf-8")
+            gpts_dir = payload / "gpts"
+            gpts_dir.mkdir()
+            (gpts_dir / "system_instructions.txt").write_text("instructions\n", "utf-8")
+            knowledge_dir = gpts_dir / "knowledge"
+            knowledge_dir.mkdir()
+            (knowledge_dir / "guide.md").write_text("guide\n", "utf-8")
             app_dir = payload / "app"
             app_dir.mkdir()
             (app_dir / "__init__.py").write_text("", "utf-8")
@@ -1150,6 +1166,26 @@ class BundledInstallerSmokeTests(unittest.TestCase):
 
             self.assertTrue((target / ".env.example").exists())
             self.assertTrue((target / "second_lane_installer.py").exists())
+            self.assertTrue((target / "gpts" / "system_instructions.txt").exists())
+            self.assertTrue((target / "gpts" / "knowledge" / "guide.md").exists())
+
+
+class LauncherScriptSmokeTests(unittest.TestCase):
+    def test_panel_launcher_uses_only_confirmed_python_313(self) -> None:
+        script = Path(__file__).resolve().parent / "Запустить Second Lane.command"
+        text = script.read_text("utf-8")
+        self.assertIn("python_gui_smoke", text)
+        self.assertIn("python3.13", text)
+        self.assertNotIn("python3.12", text)
+        self.assertNotIn("for candidate in python3.13 python3", text)
+        self.assertIn("SECOND_LANE_PROJECT_DIR", (Path(__file__).resolve().parent / "runtime_paths.py").read_text("utf-8"))
+
+    def test_control_panel_tells_user_to_wait_for_live_tunnel_before_import(self) -> None:
+        text = (Path(__file__).resolve().parent / "gpts_agent_control.py").read_text("utf-8")
+        self.assertIn("импортируй openapi.gpts.yaml", text)
+        self.assertIn("только после строки", text)
+        self.assertIn("Туннель активен", text)
+        self.assertIn("Теперь этот файл можно импортировать", text)
 
 
 if __name__ == "__main__":

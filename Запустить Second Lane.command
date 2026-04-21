@@ -10,12 +10,29 @@ cd "$(dirname "$0")" || {
   exit 1
 }
 
+export PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+python_gui_smoke() {
+  local PY_BIN="$1"
+  "$PY_BIN" - <<'PY' >/dev/null 2>&1
+import tkinter as tk
+root = tk.Tk()
+root.withdraw()
+root.update_idletasks()
+root.destroy()
+PY
+}
+
 if [[ -x ".venv/bin/python" ]]; then
   PICK=".venv/bin/python"
 else
   PICK=""
-  for candidate in python3.13 python3.12 python3; do
-    if command -v "$candidate" >/dev/null 2>&1; then
+  for candidate in \
+    /Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 \
+    /usr/local/bin/python3.13 \
+    /opt/homebrew/bin/python3.13 \
+    python3.13; do
+    if { command -v "$candidate" >/dev/null 2>&1 || [[ -x "$candidate" ]]; } && python_gui_smoke "$candidate"; then
       PICK="$candidate"
       break
     fi
@@ -25,13 +42,13 @@ fi
 if [ -z "$PICK" ]; then
   cat <<'MSG'
 
-Python не найден.
+Подходящий Python не найден.
 
-Second Lane требует Python 3.13 или 3.12.
+Second Lane сейчас подтверждён на Python 3.13 с графическим модулем tkinter.
 
 Что сделать:
 1. Запусти «Установить Second Lane.command».
-2. Если нужно, мастер сам поставит Python.
+2. Если нужно, мастер сам поставит подходящий Python.
 3. Потом снова дважды нажми «Запустить Second Lane.command».
 
 MSG

@@ -190,7 +190,9 @@ class ControlPanel:
         self.write_log(
             f"{BRAND_NAME} by {BRAND_AUTHOR}\n"
             f"{BRAND_TAGLINE}\n\n"
-            "Открой это окно и нажми «Запустить». Потом импортируй openapi.gpts.yaml в GPT Actions.\n"
+            "Открой это окно и нажми «Запустить».\n"
+            "Важно: импортируй openapi.gpts.yaml в GPT Actions только после строки "
+            "«Туннель активен». До этого в файле может быть учебный адрес-заглушка.\n"
         )
 
         footer = Frame(shell, bg=PALETTE["app_bg"])
@@ -673,7 +675,7 @@ class ControlPanel:
                 self.tunnel_url.set(f"Туннель: {self.last_url}")
                 self.update_openapi_url(self.last_url)
                 self.write_log(f"Туннель активен: {self.last_url}\n")
-                self.write_log("URL вставлен в openapi.gpts.yaml\n")
+                self.write_log("URL обновлён в openapi.gpts.yaml. Теперь этот файл можно импортировать в GPT Actions.\n")
                 tunnel_ready = True
                 threading.Thread(target=self._validate_tunnel_after_start, daemon=True).start()
 

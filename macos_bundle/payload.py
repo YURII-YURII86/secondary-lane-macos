@@ -23,12 +23,14 @@ PAYLOAD_ITEMS = (
     "app",
     "assets",
     "data",
+    "gpts",
 )
 
 MUTABLE_TOP_LEVEL = {
     ".env",
     ".installer_state.json",
     ".venv",
+    "openapi.gpts.yaml",
     "tools",
     "workspace",
 }
