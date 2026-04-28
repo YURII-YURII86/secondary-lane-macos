@@ -150,6 +150,21 @@ def normalize_ngrok_token(raw: str) -> str:
 
 
 def internet_available() -> bool:
+    curl_bin = shutil.which("curl") or "/usr/bin/curl"
+    if Path(curl_bin).exists() or shutil.which(curl_bin):
+        for url in INTERNET_CHECK_URLS:
+            try:
+                result = subprocess.run(
+                    [curl_bin, "-fsSL", "--connect-timeout", "5", "--max-time", "10", "-o", "/dev/null", url],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=12,
+                )
+            except Exception:
+                continue
+            if result.returncode == 0:
+                return True
+
     for url in INTERNET_CHECK_URLS:
         try:
             request = urllib.request.Request(url, headers={"User-Agent": "Second Lane Installer"})
@@ -160,6 +175,28 @@ def internet_available() -> bool:
         except (OSError, TimeoutError, urllib.error.URLError):
             continue
     return False
+
+
+def download_file(url: str, target: Path, timeout: int = 120) -> None:
+    curl_bin = shutil.which("curl") or "/usr/bin/curl"
+    if Path(curl_bin).exists() or shutil.which(curl_bin):
+        try:
+            result = subprocess.run(
+                [curl_bin, "-fL", "--connect-timeout", "15", "--max-time", str(timeout), "-o", str(target), url],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout + 20,
+            )
+        except Exception as exc:
+            raise StepFailed(f"curl не смог скачать файл: {exc}") from exc
+        if result.returncode == 0:
+            return
+        raise StepFailed((result.stdout or f"curl завершился с кодом {result.returncode}").strip())
+
+    request = urllib.request.Request(url, headers={"User-Agent": "Second Lane Installer"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        target.write_bytes(response.read())
 
 
 @dataclass(frozen=True)
@@ -1002,9 +1039,7 @@ class InstallerApp:
         for attempt in range(1, 4):
             try:
                 self._emit("log", text=f"\nСкачивание ngrok: попытка {attempt} из 3\n")
-                request = urllib.request.Request(url, headers={"User-Agent": "Second Lane Installer"})
-                with urllib.request.urlopen(request, timeout=60) as response:
-                    archive_path.write_bytes(response.read())
+                download_file(url, archive_path, timeout=120)
                 with zipfile.ZipFile(archive_path) as archive:
                     member = next((name for name in archive.namelist() if Path(name).name == "ngrok"), "")
                     if not member:
