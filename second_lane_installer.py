@@ -9,6 +9,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -177,16 +178,10 @@ STEP_SPECS: list[StepSpec] = [
         "Так мы заранее ловим простые проблемы, а не оставляем тебя с непонятной ошибкой в середине установки.",
     ),
     StepSpec(
-        "homebrew",
-        "Homebrew — установщик программ",
-        "Проверяю Homebrew. Это обычный установщик программ для Mac, как App Store, только для технических инструментов.",
-        "Через Homebrew мастер сам поставит всё нужное, чтобы тебе не искать команды вручную.",
-    ),
-    StepSpec(
         "python",
         "Python 3.13 — двигатель Second Lane",
-        "Проверяю Python 3.13. Это программа, на которой запускается Second Lane.",
-        "Без него панель Second Lane не сможет работать на твоём Mac.",
+        "Проверяю официальный Python 3.13. Это программа, на которой запускается Second Lane.",
+        "Берём Python через python.org, чтобы Mac с M‑процессором не зависал на сборке Homebrew.",
     ),
     StepSpec(
         "ngrok",
@@ -832,8 +827,6 @@ class InstallerApp:
     def _execute_step_body(self, step_key: str) -> None:
         if step_key == "system_check":
             self._step_system_check()
-        elif step_key == "homebrew":
-            self._step_homebrew()
         elif step_key == "python":
             self._step_python()
         elif step_key == "ngrok":
@@ -965,30 +958,15 @@ class InstallerApp:
             raise StepFailed("Mac не даёт записывать файлы в папку проекта. Перемести папку в Documents или разреши доступ.")
         self._emit("hint", text="Система готова: это Mac, интернет работает, место на диске есть, папка доступна.\n")
 
-    def _step_homebrew(self) -> None:
-        brew = self._find_brew_bin()
-        if brew:
-            self._emit("hint", text=f"Homebrew уже установлен. Это установщик программ для Mac. Путь: {brew}\n")
-            return
-        self._emit("hint", text="Homebrew не найден. Мастер попробует установить его автоматически, чтобы дальше поставить нужные программы.\n")
-        script = 'NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
-        self._run_command(["/bin/bash", "-c", script])
-        brew = self._find_brew_bin()
-        if not brew:
-            raise StepFailed("Homebrew не появился после установки. Открой brew.sh, установи Homebrew вручную и запусти мастер снова.")
-        self._emit("hint", text=f"Homebrew установлен. Теперь мастер может ставить нужные программы сам. Путь: {brew}\n")
-
     def _step_python(self) -> None:
         py = self._find_python_bin()
         if py:
             self._emit("hint", text=f"Python 3.13 уже готов. Это двигатель Second Lane. Путь: {py}\n")
             return
-        brew = self._require_brew()
-        self._run_command([brew, "install", "python@3.13"])
-        py = self._find_python_bin()
-        if not py:
-            raise StepFailed("Python 3.13 не найден после установки. Закрой и снова открой установщик, чтобы Mac обновил список программ.")
-        self._emit("hint", text=f"Python 3.13 установлен. Это двигатель Second Lane. Путь: {py}\n")
+        raise StepFailed(
+            "Python 3.13 не найден. Закрой это окно и снова запусти «Установить Second Lane.command»: "
+            "он откроет официальный installer python.org. Не ставь Python через Homebrew для этого сценария."
+        )
 
     def _step_ngrok(self) -> None:
         ngrok = self._find_ngrok_bin()
@@ -1177,35 +1155,33 @@ class InstallerApp:
             return f"Не найден нужный файл или программа для команды: {command}"
         return f"Команда не завершилась успешно (код {code}). Подробности видны в живом логе ниже."
 
-    def _find_brew_bin(self) -> str | None:
-        direct = shutil.which("brew")
-        if direct:
-            return direct
-        for candidate in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew"):
-            if Path(candidate).exists():
-                return candidate
-        return None
-
-    def _require_brew(self) -> str:
-        brew = self._find_brew_bin()
-        if not brew:
-            raise StepFailed("Homebrew не найден.")
-        return brew
-
     def _find_python_bin(self) -> str | None:
-        direct = shutil.which("python3.13")
-        if direct:
-            return direct
-        brew = self._find_brew_bin()
-        if brew:
+        candidates = [
+            sys.executable,
+            "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13",
+            "/opt/homebrew/bin/python3.13",
+            "/usr/local/bin/python3.13",
+            shutil.which("python3.13") or "",
+        ]
+        seen: set[str] = set()
+        for candidate in candidates:
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            path = Path(candidate)
+            if not path.exists() and shutil.which(candidate) is None:
+                continue
             try:
-                prefix = subprocess.check_output([brew, "--prefix", "python@3.13"], text=True).strip()
+                result = subprocess.run(
+                    [candidate, "-c", "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 13) else 1)"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
             except Exception:
-                prefix = ""
-            if prefix:
-                candidate = Path(prefix) / "bin" / "python3.13"
-                if candidate.exists():
-                    return str(candidate)
+                continue
+            if result.returncode == 0:
+                return candidate
         return None
 
     def _find_ngrok_bin(self) -> str | None:
