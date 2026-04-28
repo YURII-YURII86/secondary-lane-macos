@@ -59,6 +59,13 @@ OPENAPI_FILES = [
 DEFAULT_VENV_UVICORN = PROJECT_DIR / ".venv" / "bin" / "uvicorn"
 LOCAL_NGROK_BIN = PROJECT_DIR / "tools" / "ngrok" / "ngrok"
 PYTHON = "python3.13"
+PYTHON_CANDIDATES = (
+    sys.executable,
+    "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13",
+    "/opt/homebrew/bin/python3.13",
+    "/usr/local/bin/python3.13",
+    PYTHON,
+)
 LOCAL_URL = "http://127.0.0.1:8787"
 
 # --- Tunnel defaults ---
@@ -72,6 +79,31 @@ NGROK_BLOCKED_IP_ERROR = "ERR_NGROK_9040"
 PUBLIC_CHECK_INTERVAL_SEC = 25
 PUBLIC_CHECK_MAX_FAILURES = 2
 RECOVERY_BACKOFF_STEPS_SEC = [3, 10, 30]
+
+
+def resolve_python_313() -> str | None:
+    seen: set[str] = set()
+    for candidate in PYTHON_CANDIDATES:
+        if not candidate:
+            continue
+        path = candidate if Path(candidate).is_absolute() else shutil.which(candidate)
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        try:
+            result = subprocess.run(
+                [path, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+                cwd=PROJECT_DIR,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=5,
+            )
+        except Exception:
+            continue
+        if result.returncode == 0 and result.stdout.strip() == "3.13":
+            return path
+    return None
 
 
 @dataclass
@@ -250,7 +282,9 @@ class ControlPanel:
                 env[key.strip()] = value.strip()
         env["ENABLED_PROVIDER_MANIFESTS"] = str(PROJECT_DIR / "app" / "providers")
         env["STATE_DB_PATH"] = str(PROJECT_DIR / "data" / "agent.db")
-        default_workspace = f"{Path.home() / 'Documents'}:/workspace:/projects"
+        env["AGENT_HOST"] = "127.0.0.1"
+        env["AGENT_PORT"] = "8787"
+        default_workspace = str(Path.home() / "Documents")
         env.setdefault("WORKSPACE_ROOTS", default_workspace)
         return env
 
@@ -373,16 +407,18 @@ class ControlPanel:
     def ensure_uvicorn(self) -> bool:
         if self.uvicorn_bin().exists():
             return True
-        if not shutil.which(PYTHON):
+        python_bin = resolve_python_313()
+        if not python_bin:
             self.write_log(
                 "Не найден python3.13. Локальный запуск и pytest в этом проекте сейчас подтверждены именно на Python 3.13; "
-                "Python 3.14 для этого pinned stack не считается поддержанным.\n"
+                "Python 3.14 для этого pinned stack не считается поддержанным. "
+                "Запусти «Установить Second Lane.command», он откроет официальный установщик Python.\n"
             )
             return False
-        self.write_log("Не нашёл готовый uvicorn. Создаю окружение и ставлю зависимости через python3.13...\n")
+        self.write_log(f"Не нашёл готовый uvicorn. Создаю окружение через Python 3.13: {python_bin}\n")
         try:
             uvicorn_bin = self.uvicorn_bin()
-            subprocess.run([PYTHON, "-m", "venv", str(uvicorn_bin.parent.parent)], cwd=PROJECT_DIR, check=True)
+            subprocess.run([python_bin, "-m", "venv", str(uvicorn_bin.parent.parent)], cwd=PROJECT_DIR, check=True)
             subprocess.run(
                 [str(uvicorn_bin.parent / "pip"), "install", "-r", str(PROJECT_DIR / "requirements.txt")],
                 cwd=PROJECT_DIR,
@@ -390,7 +426,7 @@ class ControlPanel:
             )
             return True
         except Exception as exc:
-            self.write_log(f"Не смог подготовить Python-окружение через {PYTHON}: {exc}\n")
+            self.write_log(f"Не смог подготовить Python-окружение через {python_bin}: {exc}\n")
             return False
 
     # --- Start / stop ---

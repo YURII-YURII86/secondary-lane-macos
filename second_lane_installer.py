@@ -977,6 +977,7 @@ class InstallerApp:
     def _action_save_env_domain(self, domain: str) -> None:
         try:
             self._prepare_env_file()
+            self._write_runtime_env_defaults()
             self._upsert_env("NGROK_DOMAIN", domain)
             self._upsert_env("WORKSPACE_ROOTS", self._normalized_workspace_roots())
             token = self._read_env_value("AGENT_TOKEN")
@@ -1093,6 +1094,7 @@ class InstallerApp:
 
     def _step_project_env(self) -> None:
         self._prepare_env_file()
+        self._write_runtime_env_defaults()
         current_domain = self._read_env_value("NGROK_DOMAIN")
         if not self._valid_ngrok_domain(current_domain):
             if current_domain:
@@ -1304,6 +1306,12 @@ class InstallerApp:
         if not replaced:
             new_lines.append(f"{key}={value}")
         ENV_FILE.write_text("\n".join(new_lines) + "\n", "utf-8")
+
+    def _write_runtime_env_defaults(self) -> None:
+        self._upsert_env("AGENT_HOST", "127.0.0.1")
+        self._upsert_env("AGENT_PORT", "8787")
+        self._upsert_env("ENABLED_PROVIDER_MANIFESTS", str(PROJECT_DIR / "app" / "providers"))
+        self._upsert_env("STATE_DB_PATH", str(PROJECT_DIR / "data" / "agent.db"))
 
     def _generate_token(self) -> str:
         return secrets.token_hex(32)

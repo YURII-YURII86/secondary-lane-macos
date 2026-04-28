@@ -108,7 +108,7 @@ def load_settings() -> Settings:
 
     return Settings(
         agent_token=env.get("AGENT_TOKEN", "").strip(),
-        agent_host=env.get("AGENT_HOST", "0.0.0.0").strip(),
+        agent_host=env.get("AGENT_HOST", "127.0.0.1").strip(),
         agent_port=int(env.get("AGENT_PORT", "8787")),
         workspace_roots=workspace_roots,
         ssh_allowed_hosts=_json_list(env.get("SSH_ALLOWED_HOSTS_JSON", "[]"), []),
