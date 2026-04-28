@@ -4,7 +4,8 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)" || exit 1
 INSTALLER_PY="$SCRIPT_DIR/second_lane_installer.py"
-PYTHON_ORG_MACOS_URL="https://www.python.org/downloads/latest/python3.13/"
+PYTHON_ORG_MACOS_PAGE="https://www.python.org/downloads/latest/python3.13/"
+PYTHON_ORG_MACOS_PKG_FALLBACK_URL="https://www.python.org/ftp/python/3.13.13/python-3.13.13-macos11.pkg"
 
 export PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
@@ -50,6 +51,55 @@ open_external_url() {
     return 0
   fi
   open "$URL"
+}
+
+resolve_python_pkg_url() {
+  local HTML PKG_URL
+  HTML="$(curl -fsSL --compressed --max-time 20 "$PYTHON_ORG_MACOS_PAGE" 2>/dev/null || true)"
+  PKG_URL="$(
+    printf "%s" "$HTML" \
+      | grep -Eo 'https://www\.python\.org/ftp/python/3\.13\.[0-9]+/python-3\.13\.[0-9]+-macos11\.pkg|/ftp/python/3\.13\.[0-9]+/python-3\.13\.[0-9]+-macos11\.pkg' \
+      | head -n 1
+  )"
+  if [[ "$PKG_URL" == /ftp/* ]]; then
+    printf "https://www.python.org%s" "$PKG_URL"
+  elif [[ -n "$PKG_URL" ]]; then
+    printf "%s" "$PKG_URL"
+  else
+    printf "%s" "$PYTHON_ORG_MACOS_PKG_FALLBACK_URL"
+  fi
+}
+
+download_and_open_python_pkg() {
+  local PKG_URL DOWNLOAD_DIR PKG_FILE
+  PKG_URL="$(resolve_python_pkg_url)"
+  DOWNLOAD_DIR="${TMPDIR:-/tmp}/second-lane-python-installer"
+  PKG_FILE="$DOWNLOAD_DIR/$(basename "$PKG_URL")"
+
+  if [[ "${SECOND_LANE_INSTALLER_TEST_DISABLE_OPEN:-}" == "1" ]]; then
+    say_info "Тестовый режим: пропускаю скачивание Python installer."
+    return 0
+  fi
+
+  mkdir -p "$DOWNLOAD_DIR" || {
+    say_info "Не смог создать временную папку для Python installer. Открою страницу python.org."
+    open_external_url "$PYTHON_ORG_MACOS_PAGE"
+    return 0
+  }
+
+  if [[ ! -f "$PKG_FILE" ]]; then
+    say_info "Скачиваю официальный Python installer с python.org. Размер около 68 MB."
+    if ! curl -fL --progress-bar --connect-timeout 15 --max-time 600 -o "$PKG_FILE" "$PKG_URL"; then
+      say_info "Не получилось скачать .pkg автоматически. Открою страницу python.org как запасной путь."
+      open_external_url "$PYTHON_ORG_MACOS_PAGE"
+      return 0
+    fi
+  else
+    say_info "Python installer уже скачан: $PKG_FILE"
+  fi
+
+  say_info "Открываю обычное окно установки Python. В нём нажимай Continue / Install."
+  open "$PKG_FILE"
 }
 
 pause_for_user() {
@@ -131,11 +181,11 @@ install_python_from_python_org() {
   say_step "Подготовка Python 3.13"
   say_info "На этом Mac пока нет подходящего Python 3.13 для графического окна."
   say_info "Я НЕ буду ставить Python через Homebrew: на Mac с M‑процессором это иногда уходит в долгую сборку и выглядит как зависание."
-  say_info "Сейчас открою официальный Python installer от python.org. Установи его обычным окном с кнопками Continue / Install."
-  say_info "Когда установка Python закончится, вернись в это окно Terminal и нажми Enter."
+  say_info "Сейчас скачаю официальный .pkg с python.org и открою обычное окно установки."
+  say_info "Когда в окне установки появится Install Succeeded, вернись в Terminal и нажми Enter."
   say_info "Ничего технического в Terminal вводить не нужно."
   check_internet_or_stop
-  open_external_url "$PYTHON_ORG_MACOS_URL"
+  download_and_open_python_pkg
   pause_for_user
 }
 

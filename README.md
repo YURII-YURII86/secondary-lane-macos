@@ -197,7 +197,7 @@ Second Lane построен вокруг другой идеи:
 
 Важно: ничего не вводи в Terminal вручную. Если Terminal открылся, просто смотри на подсказки установщика.
 
-На Mac с M‑процессором установщик не ставит Python через Homebrew. Если Python 3.13 отсутствует, он откроет официальный installer с python.org, чтобы не зависать на сборке системных библиотек.
+На Mac с M‑процессором установщик не ставит Python через Homebrew. Если Python 3.13 отсутствует, он скачает официальный `.pkg` с python.org и откроет обычное окно установки, чтобы не зависать на сборке системных библиотек.
 
 Если Mac блокирует запуск, нажми правой кнопкой на `Установить Second Lane.command` и выбери `Открыть`.
 
@@ -430,7 +430,7 @@ And it deliberately avoids weaker or noisier GPT-facing browser/GUI convenience 
 
 Important: do not type commands into Terminal manually. If Terminal opens, just watch it and follow the installer prompts.
 
-On Apple Silicon Macs, the installer does not install Python through Homebrew. If Python 3.13 is missing, it opens the official python.org installer to avoid long source builds.
+On Apple Silicon Macs, the installer does not install Python through Homebrew. If Python 3.13 is missing, it downloads the official python.org `.pkg` and opens the normal macOS installer to avoid long source builds.
 
 If macOS blocks the file, right-click `Установить Second Lane.command` and choose `Open`.
 
