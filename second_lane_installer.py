@@ -568,6 +568,13 @@ class InstallerApp:
             self.step_list.selection_set(self.current_step_index)
             self.step_list.see(self.current_step_index)
 
+    def _set_packed(self, widget: tk.Widget, should_show: bool, **pack_options) -> None:
+        is_visible = bool(widget.winfo_manager())
+        if should_show and not is_visible:
+            widget.pack(**pack_options)
+        elif not should_show and is_visible:
+            widget.pack_forget()
+
     def _refresh_step_panel(self) -> None:
         idx = min(max(self.current_step_index, 0), len(STEP_SPECS) - 1)
         step = STEP_SPECS[idx]
@@ -578,38 +585,34 @@ class InstallerApp:
         self.step_why.configure(text=f"Зачем: {step.why}")
         self.header_status.set(f"Шаг {idx + 1} из {len(STEP_SPECS)}")
 
-        self.ngrok_token_row.pack_forget()
-        self.ngrok_domain_row.pack_forget()
-        self.workspace_row.pack_forget()
-        self.action_hint.configure(text="")
-        self.action_hint_box.pack_forget()
+        show_hint = False
+        hint_text = ""
+        show_token = False
+        show_domain = False
+        show_workspace = False
 
         if status == "action":
-            self.action_hint_box.pack(fill=X, pady=(10, 8), before=self.input_frame)
+            show_hint = True
             if step.key == "ngrok_auth":
-                self.action_hint.configure(
-                    text=(
-                        "Нужно одно ручное действие: получить ключ ngrok и вставить его в поле ниже.\n"
-                        "Если аккаунта ngrok нет, нажми «Открыть ngrok и получить ключ». Откроется сайт ngrok: создай бесплатный аккаунт через Google, GitHub или email.\n"
-                        "После входа открой страницу Your Authtoken, скопируй длинный ключ и вставь его сюда. В Terminal ничего вставлять не нужно."
-                    )
+                hint_text = (
+                    "Нужно одно ручное действие: получить ключ ngrok и вставить его в поле ниже.\n"
+                    "Если аккаунта ngrok нет, нажми «Открыть ngrok и получить ключ». Откроется сайт ngrok: создай бесплатный аккаунт через Google, GitHub или email.\n"
+                    "После входа открой страницу Your Authtoken, скопируй длинный ключ и вставь его сюда. В Terminal ничего вставлять не нужно."
                 )
-                self.ngrok_token_row.pack(fill=X, pady=2)
+                show_token = True
                 self.primary_button_text.set("Сохранить ключ")
                 self.secondary_button_text.set("Открыть ngrok и получить ключ")
             elif step.key == "project_env":
-                self.action_hint.configure(
-                    text=(
-                        "Вставь адрес ngrok. Он выглядит примерно так: my-name.ngrok-free.dev.\n"
-                        "Если адреса ещё нет, нажми «Открыть адреса ngrok». В кабинете ngrok создай бесплатный статический адрес, скопируй только домен без https:// и вставь сюда.\n"
-                        "Ниже выбери рабочую папку. Агент сможет работать только внутри неё, а не по всему Mac.\n"
-                        "Этот адрес нужен, чтобы ChatGPT всегда знал, куда обращаться на твоём Mac."
-                    )
+                hint_text = (
+                    "Вставь адрес ngrok. Он выглядит примерно так: my-name.ngrok-free.dev.\n"
+                    "Если адреса ещё нет, нажми «Открыть адреса ngrok». В кабинете ngrok создай бесплатный статический адрес, скопируй только домен без https:// и вставь сюда.\n"
+                    "Ниже выбери рабочую папку. Агент сможет работать только внутри неё, а не по всему Mac.\n"
+                    "Этот адрес нужен, чтобы ChatGPT всегда знал, куда обращаться на твоём Mac."
                 )
-                self.ngrok_domain_row.pack(fill=X, pady=2)
+                show_domain = True
                 if not self.workspace_root_var.get().strip():
                     self.workspace_root_var.set(self._workspace_root_for_ui())
-                self.workspace_row.pack(fill=X, pady=(8, 2))
+                show_workspace = True
                 self.primary_button_text.set("Сохранить адрес")
                 self.secondary_button_text.set("Открыть адреса ngrok")
             else:
@@ -618,12 +621,10 @@ class InstallerApp:
         elif step.key == "finish" and status == "done":
             self.primary_button_text.set("Запустить Second Lane")
             self.secondary_button_text.set("Открыть памятку GPT")
-            self.action_hint_box.pack(fill=X, pady=(10, 8), before=self.input_frame)
-            self.action_hint.configure(
-                text=(
-                    "Установка на Mac завершена. Нажми «Запустить Second Lane», чтобы открыть панель управления.\n"
-                    "Потом открой памятку GPT: там простыми шагами написано, что нажать в ChatGPT и какие файлы выбрать."
-                )
+            show_hint = True
+            hint_text = (
+                "Установка на Mac завершена. Нажми «Запустить Second Lane», чтобы открыть панель управления.\n"
+                "Потом открой памятку GPT: там простыми шагами написано, что нажать в ChatGPT и какие файлы выбрать."
             )
         else:
             if status == "error":
@@ -635,6 +636,12 @@ class InstallerApp:
             else:
                 self.primary_button_text.set("Продолжить")
             self.secondary_button_text.set("Что это значит?")
+
+        self.action_hint.configure(text=hint_text)
+        self._set_packed(self.action_hint_box, show_hint, fill=X, pady=(10, 8), before=self.input_frame)
+        self._set_packed(self.ngrok_token_row, show_token, fill=X, pady=2)
+        self._set_packed(self.ngrok_domain_row, show_domain, fill=X, pady=2)
+        self._set_packed(self.workspace_row, show_workspace, fill=X, pady=(8, 2))
 
         if self.busy:
             self.primary_btn.state(["disabled"])
@@ -829,6 +836,7 @@ class InstallerApp:
         thread.start()
 
     def _poll_worker_queue(self) -> None:
+        refresh_needed = False
         while True:
             try:
                 kind, payload = self.worker_queue.get_nowait()
@@ -843,19 +851,25 @@ class InstallerApp:
                 self.step_status[key] = payload["status"]
                 self.current_step_index = payload["index"]
                 self._save_state()
+                refresh_needed = True
             elif kind == "next_step":
                 self.current_step_index = payload["index"]
                 self._save_state()
+                refresh_needed = True
             elif kind == "busy":
                 self.busy = payload["value"]
+                refresh_needed = True
             elif kind == "hint":
                 self._log(payload["text"])
             elif kind == "clear_ngrok_token":
                 self.ngrok_token_var.set("")
+                refresh_needed = True
             elif kind == "set_ngrok_domain":
                 self.ngrok_domain_var.set(payload["value"])
+                refresh_needed = True
 
-        self._refresh_step_panel()
+        if refresh_needed:
+            self._refresh_step_panel()
         self.root.after(120, self._poll_worker_queue)
 
     def _emit(self, kind: str, **payload) -> None:
