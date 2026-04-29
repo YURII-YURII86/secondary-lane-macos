@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)" || exit 1
 INSTALLER_PY="$SCRIPT_DIR/second_lane_installer.py"
 PYTHON_ORG_MACOS_PAGE="https://www.python.org/downloads/latest/python3.13/"
 PYTHON_ORG_MACOS_PKG_FALLBACK_URL="https://www.python.org/ftp/python/3.13.13/python-3.13.13-macos11.pkg"
+PYTHON_ORG_MACOS_PKG_MIN_BYTES=50000000
 
 export PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
@@ -15,7 +16,10 @@ if [[ "${SECOND_LANE_INSTALLER_FORCE_BOOTSTRAP:-}" != "1" ]]; then
   for PY_BIN in python3.13; do
     if command -v "$PY_BIN" >/dev/null 2>&1; then
       if "$PY_BIN" - <<'PY' >/dev/null 2>&1
+import sys
 import tkinter as tk
+if sys.version_info[:2] != (3, 13):
+    raise SystemExit(1)
 root = tk.Tk()
 root.withdraw()
 root.update_idletasks()
@@ -71,10 +75,11 @@ resolve_python_pkg_url() {
 }
 
 download_and_open_python_pkg() {
-  local PKG_URL DOWNLOAD_DIR PKG_FILE
+  local PKG_URL DOWNLOAD_DIR PKG_FILE PKG_PART PKG_SIZE
   PKG_URL="$(resolve_python_pkg_url)"
   DOWNLOAD_DIR="${TMPDIR:-/tmp}/second-lane-python-installer"
   PKG_FILE="$DOWNLOAD_DIR/$(basename "$PKG_URL")"
+  PKG_PART="$PKG_FILE.partial"
 
   if [[ "${SECOND_LANE_INSTALLER_TEST_DISABLE_OPEN:-}" == "1" ]]; then
     say_info "Тестовый режим: пропускаю скачивание Python installer."
@@ -87,13 +92,31 @@ download_and_open_python_pkg() {
     return 0
   }
 
+  if [[ -f "$PKG_FILE" ]]; then
+    PKG_SIZE="$(stat -f%z "$PKG_FILE" 2>/dev/null || stat -c%s "$PKG_FILE" 2>/dev/null || printf "0")"
+    if [[ "${PKG_SIZE:-0}" -lt "$PYTHON_ORG_MACOS_PKG_MIN_BYTES" ]]; then
+      say_info "Ранее скачанный Python installer выглядит неполным. Скачаю заново."
+      rm -f "$PKG_FILE"
+    fi
+  fi
+
   if [[ ! -f "$PKG_FILE" ]]; then
     say_info "Скачиваю официальный Python installer с python.org. Размер около 68 MB."
-    if ! curl -fL --progress-bar --connect-timeout 15 --max-time 600 -o "$PKG_FILE" "$PKG_URL"; then
+    rm -f "$PKG_PART"
+    if ! curl -fL --progress-bar --connect-timeout 15 --max-time 600 -o "$PKG_PART" "$PKG_URL"; then
+      rm -f "$PKG_PART"
       say_info "Не получилось скачать .pkg автоматически. Открою страницу python.org как запасной путь."
       open_external_url "$PYTHON_ORG_MACOS_PAGE"
       return 0
     fi
+    PKG_SIZE="$(stat -f%z "$PKG_PART" 2>/dev/null || stat -c%s "$PKG_PART" 2>/dev/null || printf "0")"
+    if [[ "${PKG_SIZE:-0}" -lt "$PYTHON_ORG_MACOS_PKG_MIN_BYTES" ]]; then
+      rm -f "$PKG_PART"
+      say_info "Скачанный .pkg выглядит неполным. Открою страницу python.org как запасной путь."
+      open_external_url "$PYTHON_ORG_MACOS_PAGE"
+      return 0
+    fi
+    mv "$PKG_PART" "$PKG_FILE"
   else
     say_info "Python installer уже скачан: $PKG_FILE"
   fi
@@ -130,7 +153,10 @@ check_internet_or_stop() {
 python_gui_smoke() {
   local PY_BIN="$1"
   "$PY_BIN" - <<'PY' >/dev/null 2>&1
+import sys
 import tkinter as tk
+if sys.version_info[:2] != (3, 13):
+    raise SystemExit(1)
 root = tk.Tk()
 root.withdraw()
 root.update_idletasks()

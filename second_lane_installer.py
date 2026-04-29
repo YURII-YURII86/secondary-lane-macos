@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from dataclasses import dataclass
@@ -50,8 +51,8 @@ REQUIREMENTS_FILE = PROJECT_DIR / "requirements.txt"
 CONTROL_PANEL_FILE = PROJECT_DIR / "gpts_agent_control.py"
 CONNECT_GUIDE_FILE = PROJECT_DIR / "CONNECT_GPT_ACTIONS_RU.md"
 NGROK_SIGNUP_URL = "https://dashboard.ngrok.com/signup"
-NGROK_AUTHTOKEN_URL = "https://dashboard.ngrok.com/get-started/your-authtoken"
-NGROK_DOMAINS_URL = "https://dashboard.ngrok.com/cloud-edge/domains"
+NGROK_AUTHTOKEN_URL = "https://dashboard.ngrok.com/tunnels/authtokens"
+NGROK_DOMAINS_URL = "https://dashboard.ngrok.com/domains"
 NGROK_DIRECT_DOWNLOADS = {
     "x86_64": "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-amd64.zip",
     "amd64": "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-amd64.zip",
@@ -113,11 +114,24 @@ STATUS_TEXT = {
     "error": "Ошибка",
 }
 
-NGROK_DOMAIN_REGEX = re.compile(r"^[A-Za-z0-9-]+\.(?:ngrok-free\.dev|ngrok\.app)$")
+DOMAIN_HOSTNAME_REGEX = re.compile(
+    r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
+)
+NGROK_MANAGED_SUFFIXES = (
+    ".ngrok-free.app",
+    ".ngrok-free.dev",
+    ".ngrok-free.pizza",
+    ".ngrok.app",
+    ".ngrok.dev",
+    ".ngrok.pizza",
+)
 PLACEHOLDER_NGROK_DOMAINS = {
     "your-domain.ngrok-free.dev",
+    "your-domain.ngrok-free.app",
     "example.ngrok-free.dev",
+    "example.ngrok-free.app",
     "something.ngrok-free.dev",
+    "something.ngrok-free.app",
 }
 
 
@@ -147,6 +161,21 @@ def normalize_ngrok_token(raw: str) -> str:
     if len(parts) > 1:
         cleaned = parts[-1]
     return cleaned.strip().strip("'\"")
+
+
+def normalize_ngrok_domain(raw: str) -> str:
+    cleaned = raw.strip().strip("'\"")
+    if not cleaned:
+        return ""
+    first_token = cleaned.split()[0].strip().strip("'\"")
+    if "://" in first_token:
+        parsed = urllib.parse.urlparse(first_token)
+        cleaned = parsed.netloc or parsed.path
+    else:
+        cleaned = first_token
+    cleaned = cleaned.removeprefix("https://").removeprefix("http://")
+    cleaned = cleaned.split("/", 1)[0].strip().strip(".").lower()
+    return cleaned
 
 
 def internet_available() -> bool:
@@ -594,18 +623,26 @@ class InstallerApp:
         if status == "action":
             show_hint = True
             if step.key == "ngrok_auth":
-                hint_text = (
-                    "Нужно одно ручное действие: получить ключ ngrok и вставить его в поле ниже.\n"
-                    "Если аккаунта ngrok нет, нажми «Открыть ngrok и получить ключ». Откроется сайт ngrok: создай бесплатный аккаунт через Google, GitHub или email.\n"
-                    "После входа открой страницу Your Authtoken, скопируй длинный ключ и вставь его сюда. В Terminal ничего вставлять не нужно."
-                )
+                if self._has_ngrok_auth():
+                    hint_text = (
+                        "На этом Mac уже есть сохранённый ключ ngrok.\n"
+                        "Самый простой вариант: нажми «Продолжить с текущим ключом». Если потом ngrok отклонит доступ, вернись сюда, вставь новый ключ и нажми эту же кнопку.\n"
+                        "Если хочешь заменить ключ сразу, нажми «Открыть ngrok и получить ключ», скопируй новый Authtoken и вставь его в поле ниже."
+                    )
+                    self.primary_button_text.set("Продолжить с текущим ключом")
+                else:
+                    hint_text = (
+                        "Нужно одно ручное действие: получить ключ ngrok и вставить его в поле ниже.\n"
+                        "Если аккаунта ngrok нет, нажми «Открыть ngrok и получить ключ». Откроется сайт ngrok: создай бесплатный аккаунт через Google, GitHub или email.\n"
+                        "После входа открой страницу Authtokens, скопируй длинный ключ и вставь его сюда. В Terminal ничего вставлять не нужно."
+                    )
+                    self.primary_button_text.set("Сохранить ключ")
                 show_token = True
-                self.primary_button_text.set("Сохранить ключ")
                 self.secondary_button_text.set("Открыть ngrok и получить ключ")
             elif step.key == "project_env":
                 hint_text = (
-                    "Вставь адрес ngrok. Он выглядит примерно так: my-name.ngrok-free.dev.\n"
-                    "Если адреса ещё нет, нажми «Открыть адреса ngrok». В кабинете ngrok создай бесплатный статический адрес, скопируй только домен без https:// и вставь сюда.\n"
+                    "Вставь адрес ngrok. Он выглядит примерно так: my-name.ngrok-free.app или my-name.ngrok-free.dev.\n"
+                    "Если адреса ещё нет, нажми «Открыть адреса ngrok». В кабинете ngrok скопируй свой бесплатный Dev Domain. Можно вставлять весь URL с https:// — мастер сам оставит только домен.\n"
                     "Ниже выбери рабочую папку. Агент сможет работать только внутри неё, а не по всему Mac.\n"
                     "Этот адрес нужен, чтобы ChatGPT всегда знал, куда обращаться на твоём Mac."
                 )
@@ -720,8 +757,7 @@ class InstallerApp:
         self.ngrok_token_entry.icursor(END)
 
     def _paste_ngrok_domain_from_clipboard(self) -> None:
-        text = self._clipboard_text().strip()
-        text = text.removeprefix("https://").removeprefix("http://").strip().strip("/")
+        text = normalize_ngrok_domain(self._clipboard_text())
         if not text:
             messagebox.showwarning(
                 "Буфер обмена пуст",
@@ -757,8 +793,23 @@ class InstallerApp:
         self.root.destroy()
 
     def _reset_state(self) -> None:
-        if not messagebox.askyesno("Начать заново", "Сбросить прогресс установщика и начать заново?"):
+        if not messagebox.askyesno(
+            "Начать заново",
+            "Сбросить прогресс, удалить созданный .env, локальное Python-окружение и локальный ngrok в этой папке?\n\n"
+            "Код проекта и твои рабочие файлы мастер не тронет.",
+        ):
             return
+        cleanup_errors: list[str] = []
+        for file_path in (STATE_FILE, ENV_FILE):
+            try:
+                file_path.unlink(missing_ok=True)
+            except Exception as exc:
+                cleanup_errors.append(f"{file_path.name}: {exc}")
+        for dir_path in (VENV_DIR, LOCAL_NGROK_BIN.parent, TOOLS_DIR / "downloads"):
+            try:
+                shutil.rmtree(dir_path, ignore_errors=True)
+            except Exception as exc:
+                cleanup_errors.append(f"{dir_path.name}: {exc}")
         self.current_step_index = 0
         self.step_status = {step.key: "pending" for step in STEP_SPECS}
         self.ngrok_token_var.set("")
@@ -766,7 +817,9 @@ class InstallerApp:
         self.workspace_root_var.set(self._workspace_root_for_ui())
         self._save_state()
         self._refresh_step_panel()
-        self._log("\nПрогресс сброшен. Можно начать установку заново.\n")
+        self._log("\nУстановка сброшена. Можно начать заново с чистыми локальными настройками.\n")
+        if cleanup_errors:
+            self._log("Не всё удалось удалить автоматически:\n" + "\n".join(cleanup_errors) + "\n")
 
     def _on_secondary(self) -> None:
         step = STEP_SPECS[self.current_step_index]
@@ -796,6 +849,9 @@ class InstallerApp:
 
         if step.key == "ngrok_auth" and status == "action":
             token = normalize_ngrok_token(self.ngrok_token_var.get())
+            if not token and self._has_ngrok_auth():
+                self._run_async(self._action_accept_existing_ngrok_token)
+                return
             if not token:
                 messagebox.showwarning(
                     "Нужен ключ ngrok",
@@ -806,13 +862,14 @@ class InstallerApp:
             return
 
         if step.key == "project_env" and status == "action":
-            domain = self.ngrok_domain_var.get().strip()
+            domain = normalize_ngrok_domain(self.ngrok_domain_var.get())
             if not self._valid_ngrok_domain(domain):
                 messagebox.showwarning(
                     "Неверный адрес ngrok",
-                    "Нужен адрес вида my-name.ngrok-free.dev. Его нужно создать или скопировать в кабинете ngrok.",
+                    "Нужен адрес вида my-name.ngrok-free.app или my-name.ngrok-free.dev. Можно вставить полный URL — мастер сам уберёт https://.",
                 )
                 return
+            self.ngrok_domain_var.set(domain)
             workspace_root = self.workspace_root_var.get().strip()
             if not self._valid_workspace_root(workspace_root):
                 messagebox.showwarning(
@@ -974,8 +1031,30 @@ class InstallerApp:
             self._emit("hint", text=f"Не удалось сохранить ключ ngrok: {exc}\n")
         self._emit("busy", value=False)
 
+    def _action_accept_existing_ngrok_token(self) -> None:
+        try:
+            ngrok_bin = self._find_ngrok_bin()
+            if not ngrok_bin:
+                raise StepFailed("Программа ngrok не найдена. Вернись к шагу установки ngrok и нажми «Продолжить».")
+            if not self._has_ngrok_auth():
+                raise StepFailed("Сохранённый ключ ngrok не найден. Вставь новый ключ из кабинета ngrok.")
+            self._check_ngrok_config(ngrok_bin)
+            self._emit("hint", text="Продолжаю с уже сохранённым ключом ngrok. Если он окажется старым, панель запуска покажет понятную ошибку.\n")
+            self._emit("step_status", key="ngrok_auth", status="done", index=self.current_step_index)
+            next_index = min(self.current_step_index + 1, len(STEP_SPECS) - 1)
+            self._emit("next_step", index=next_index)
+            self._run_steps_until_blocked(next_index)
+            return
+        except Exception as exc:
+            self._emit("step_status", key="ngrok_auth", status="action", index=self.current_step_index)
+            self._emit("hint", text=f"Не удалось продолжить с текущим ключом ngrok: {exc}\nВставь новый ключ ngrok и нажми «Сохранить ключ».\n")
+        self._emit("busy", value=False)
+
     def _action_save_env_domain(self, domain: str) -> None:
         try:
+            domain = normalize_ngrok_domain(domain)
+            if not self._valid_ngrok_domain(domain):
+                raise StepFailed("Адрес ngrok выглядит неверно. Вставь домен вида my-name.ngrok-free.app без лишнего текста.")
             self._prepare_env_file()
             self._write_runtime_env_defaults()
             self._upsert_env("NGROK_DOMAIN", domain)
@@ -1084,9 +1163,17 @@ class InstallerApp:
         if not ngrok:
             raise StepFailed("Программа ngrok не найдена. Сначала пройди шаг установки ngrok.")
         if self._has_ngrok_auth():
-            self._check_ngrok_config(ngrok)
-            self._emit("hint", text="Ключ ngrok уже настроен и прошёл проверку.\n")
-            return
+            try:
+                self._check_ngrok_config(ngrok)
+            except StepFailed:
+                raise StepActionRequired(
+                    "На этом Mac есть сохранённый ключ ngrok, но конфиг выглядит повреждённым. Вставь новый ключ ngrok.",
+                    action_key="ngrok_auth",
+                )
+            raise StepActionRequired(
+                "На этом Mac уже есть сохранённый ключ ngrok. Можно продолжить с ним или вставить новый ключ.",
+                action_key="ngrok_auth",
+            )
         raise StepActionRequired(
             "Ключ ngrok не найден. Вставь ключ в поле ниже и нажми «Сохранить ключ».",
             action_key="ngrok_auth",
@@ -1096,13 +1183,16 @@ class InstallerApp:
         self._prepare_env_file()
         self._write_runtime_env_defaults()
         current_domain = self._read_env_value("NGROK_DOMAIN")
-        if not self._valid_ngrok_domain(current_domain):
+        normalized_domain = normalize_ngrok_domain(current_domain)
+        if not self._valid_ngrok_domain(normalized_domain):
             if current_domain:
                 self._emit("set_ngrok_domain", value=current_domain)
             raise StepActionRequired(
-                "Нужен корректный адрес ngrok. Пример: my-name.ngrok-free.dev.",
+                "Нужен корректный адрес ngrok. Пример: my-name.ngrok-free.app.",
                 action_key="project_env",
             )
+        if normalized_domain != current_domain:
+            self._upsert_env("NGROK_DOMAIN", normalized_domain)
 
         token = self._read_env_value("AGENT_TOKEN")
         if not token_is_safe(token):
@@ -1116,11 +1206,16 @@ class InstallerApp:
         py = self._find_python_bin()
         if not py:
             raise StepFailed("Не найден Python 3.13.")
+        vpy = VENV_DIR / "bin" / "python"
+        if VENV_DIR.exists() and (not vpy.exists() or not self._python_is_313(str(vpy))):
+            self._emit("hint", text="Нашёл старое Python-окружение не на 3.13. Пересоздаю его безопасно.\n")
+            shutil.rmtree(VENV_DIR, ignore_errors=True)
         if not VENV_DIR.exists():
             self._run_command([py, "-m", "venv", str(VENV_DIR)])
-        vpy = VENV_DIR / "bin" / "python"
         if not vpy.exists():
             raise StepFailed("Не удалось создать отдельную рабочую папку Python для Second Lane.")
+        if not self._python_is_313(str(vpy)):
+            raise StepFailed("Локальное Python-окружение создалось не на Python 3.13. Удали .venv через «Начать заново» и повтори установку.")
         self._run_command([str(vpy), "-m", "pip", "install", "--upgrade", "pip"])
         self._run_command([str(vpy), "-m", "pip", "install", "-r", str(REQUIREMENTS_FILE)])
         self._run_command([str(vpy), "-c", "import fastapi,uvicorn;print('deps-ok')"])
@@ -1222,18 +1317,21 @@ class InstallerApp:
             path = Path(candidate)
             if not path.exists() and shutil.which(candidate) is None:
                 continue
-            try:
-                result = subprocess.run(
-                    [candidate, "-c", "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 13) else 1)"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5,
-                )
-            except Exception:
-                continue
-            if result.returncode == 0:
+            if self._python_is_313(candidate):
                 return candidate
         return None
+
+    def _python_is_313(self, candidate: str) -> bool:
+        try:
+            result = subprocess.run(
+                [candidate, "-c", "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 13) else 1)"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except Exception:
+            return False
+        return result.returncode == 0
 
     def _find_ngrok_bin(self) -> str | None:
         if LOCAL_NGROK_BIN.exists():
@@ -1258,7 +1356,7 @@ class InstallerApp:
             if not cfg.exists():
                 continue
             try:
-                text = cfg.read_text("utf-8")
+                text = cfg.read_text("utf-8-sig")
             except Exception:
                 continue
             if re.search(r"^\s*authtoken\s*:\s*.+$", text, flags=re.MULTILINE):
@@ -1282,7 +1380,7 @@ class InstallerApp:
     def _read_env_value(self, key: str) -> str:
         if not ENV_FILE.exists():
             return ""
-        for raw_line in ENV_FILE.read_text("utf-8").splitlines():
+        for raw_line in ENV_FILE.read_text("utf-8-sig").splitlines():
             line = raw_line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
@@ -1294,7 +1392,7 @@ class InstallerApp:
     def _upsert_env(self, key: str, value: str) -> None:
         lines: list[str] = []
         if ENV_FILE.exists():
-            lines = ENV_FILE.read_text("utf-8").splitlines()
+            lines = ENV_FILE.read_text("utf-8-sig").splitlines()
         replaced = False
         new_lines: list[str] = []
         for raw in lines:
@@ -1321,17 +1419,25 @@ class InstallerApp:
         if self._valid_workspace_root(selected):
             return str(Path(selected).expanduser().resolve())
         current = self._read_env_value("WORKSPACE_ROOTS")
-        if current and current != "/Users/your-name/Documents:/workspace:/projects":
+        if current and not self._is_placeholder_workspace_roots(current):
             return current
         return str((Path.home() / "Documents").expanduser().resolve())
 
     def _workspace_root_for_ui(self) -> str:
         current = self._read_env_value("WORKSPACE_ROOTS")
-        if current and current != "/Users/your-name/Documents:/workspace:/projects":
+        if current and not self._is_placeholder_workspace_roots(current):
             first = current.split(":", 1)[0].strip()
             if first:
                 return first
         return str((Path.home() / "Documents").expanduser().resolve())
+
+    def _is_placeholder_workspace_roots(self, value: str) -> bool:
+        normalized = value.strip()
+        return normalized in {
+            "/Users/your-name/Documents",
+            "/Users/your-name/Documents:/workspace:/projects",
+            "/workspace:/projects",
+        }
 
     def _valid_workspace_root(self, path_text: str) -> bool:
         if not path_text.strip():
@@ -1343,13 +1449,18 @@ class InstallerApp:
         return candidate.exists() and candidate.is_dir()
 
     def _valid_ngrok_domain(self, domain: str) -> bool:
-        cleaned = domain.strip().lower()
+        cleaned = normalize_ngrok_domain(domain)
         if not cleaned or cleaned in PLACEHOLDER_NGROK_DOMAINS:
             return False
-        return bool(NGROK_DOMAIN_REGEX.match(cleaned))
+        if cleaned.startswith("*."):
+            return False
+        if not DOMAIN_HOSTNAME_REGEX.match(cleaned):
+            return False
+        return cleaned.endswith(NGROK_MANAGED_SUFFIXES) or "." in cleaned
 
     def _launch_control_panel(self) -> None:
-        py = str(VENV_DIR / "bin" / "python") if (VENV_DIR / "bin" / "python").exists() else self._find_python_bin()
+        vpy = VENV_DIR / "bin" / "python"
+        py = str(vpy) if vpy.exists() and self._python_is_313(str(vpy)) else self._find_python_bin()
         if not py:
             messagebox.showerror("Ошибка", "Не найден Python для запуска панели. Сначала пройди шаги установки.")
             return

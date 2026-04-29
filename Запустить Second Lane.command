@@ -12,10 +12,13 @@ cd "$(dirname "$0")" || {
 
 export PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
-python_gui_smoke() {
+python_313_gui_ok() {
   local PY_BIN="$1"
   "$PY_BIN" - <<'PY' >/dev/null 2>&1
+import sys
 import tkinter as tk
+if sys.version_info[:2] != (3, 13):
+    raise SystemExit(1)
 root = tk.Tk()
 root.withdraw()
 root.update_idletasks()
@@ -23,7 +26,7 @@ root.destroy()
 PY
 }
 
-if [[ -x ".venv/bin/python" ]]; then
+if [[ -x ".venv/bin/python" ]] && python_313_gui_ok ".venv/bin/python"; then
   PICK=".venv/bin/python"
 else
   PICK=""
@@ -32,7 +35,7 @@ else
     /usr/local/bin/python3.13 \
     /opt/homebrew/bin/python3.13 \
     python3.13; do
-    if { command -v "$candidate" >/dev/null 2>&1 || [[ -x "$candidate" ]]; } && python_gui_smoke "$candidate"; then
+    if { command -v "$candidate" >/dev/null 2>&1 || [[ -x "$candidate" ]]; } && python_313_gui_ok "$candidate"; then
       PICK="$candidate"
       break
     fi

@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import json
 from dataclasses import dataclass
@@ -104,6 +105,35 @@ def resolve_python_313() -> str | None:
         if result.returncode == 0 and result.stdout.strip() == "3.13":
             return path
     return None
+
+
+def python_is_313(candidate: str | Path) -> bool:
+    try:
+        result = subprocess.run(
+            [str(candidate), "-c", "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 13) else 1)"],
+            cwd=PROJECT_DIR,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
+def normalize_ngrok_domain(raw: str) -> str:
+    cleaned = raw.strip().strip("'\"")
+    if not cleaned:
+        return ""
+    first_token = cleaned.split()[0].strip().strip("'\"")
+    if "://" in first_token:
+        parsed = urllib.parse.urlparse(first_token)
+        cleaned = parsed.netloc or parsed.path
+    else:
+        cleaned = first_token
+    cleaned = cleaned.removeprefix("https://").removeprefix("http://")
+    return cleaned.split("/", 1)[0].strip().strip(".").lower()
 
 
 @dataclass
@@ -274,7 +304,7 @@ class ControlPanel:
     def load_env(self) -> dict[str, str]:
         env = os.environ.copy()
         if ENV_FILE.exists():
-            for line in ENV_FILE.read_text("utf-8").splitlines():
+            for line in ENV_FILE.read_text("utf-8-sig").splitlines():
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:
                     continue
@@ -313,7 +343,7 @@ class ControlPanel:
         )
 
     def ngrok_domain(self) -> str:
-        return self.load_env().get("NGROK_DOMAIN", DEFAULT_NGROK_DOMAIN).strip()
+        return normalize_ngrok_domain(self.load_env().get("NGROK_DOMAIN", DEFAULT_NGROK_DOMAIN))
 
     def _classify_ngrok_output(self, text: str) -> TunnelFailure:
         lowered = text.lower()
@@ -405,6 +435,11 @@ class ControlPanel:
         return DEFAULT_VENV_UVICORN
 
     def ensure_uvicorn(self) -> bool:
+        venv_dir = PROJECT_DIR / ".venv"
+        vpy = venv_dir / "bin" / "python"
+        if venv_dir.exists() and (not vpy.exists() or not python_is_313(vpy)):
+            self.write_log("Локальное .venv создано не на Python 3.13. Пересоздаю окружение, чтобы запуск был предсказуемым.\n")
+            shutil.rmtree(venv_dir, ignore_errors=True)
         if self.uvicorn_bin().exists():
             return True
         python_bin = resolve_python_313()

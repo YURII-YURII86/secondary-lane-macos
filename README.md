@@ -161,7 +161,7 @@ Second Lane построен вокруг другой идеи:
 
 Именно её нужно импортировать в GPT Actions после строки `Туннель активен` в панели Second Lane Control.
 
-Если импортировать файл прямо из GitHub до запуска панели, внутри будет учебный адрес `your-domain.ngrok-free.dev`. GPT запомнит этот адрес, и Actions будут долго ждать ответ от несуществующего сервера.
+Если импортировать файл прямо из GitHub до запуска панели, внутри будет учебный адрес `your-domain.ngrok-free.app`. GPT запомнит этот адрес, и Actions будут долго ждать ответ от несуществующего сервера.
 
 ### Самые сильные workflow actions в GPT schema
 
@@ -436,11 +436,14 @@ If macOS blocks the file, right-click `Установить Second Lane.command`
 
 ### Connect Your GPT
 
-1. Import `openapi.gpts.yaml` into GPT Actions.
-2. Set the bearer token from `.env`.
-3. Paste `gpts/system_instructions.txt` into your GPT instructions.
-4. Upload `gpts/knowledge/` into GPT knowledge.
-5. Verify the first `getCapabilities`, `inspectProject`, and `runTest` calls.
+1. Start the Second Lane Control panel.
+2. Wait for the `Tunnel active` / `Туннель активен` log line.
+3. Make sure the log says the URL was updated in `openapi.gpts.yaml`.
+4. Import `openapi.gpts.yaml` into GPT Actions only after that.
+5. Set the bearer token from `.env`.
+6. Paste `gpts/system_instructions.txt` into your GPT instructions.
+7. Upload `gpts/knowledge/` into GPT knowledge.
+8. Verify the first `getCapabilities`, `inspectProject`, and `runTest` calls.
 
 ### Project Structure
 
