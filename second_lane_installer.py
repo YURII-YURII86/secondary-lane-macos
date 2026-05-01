@@ -53,6 +53,11 @@ CONNECT_GUIDE_FILE = PROJECT_DIR / "CONNECT_GPT_ACTIONS_RU.md"
 NGROK_SIGNUP_URL = "https://dashboard.ngrok.com/signup"
 NGROK_AUTHTOKEN_URL = "https://dashboard.ngrok.com/tunnels/authtokens"
 NGROK_DOMAINS_URL = "https://dashboard.ngrok.com/domains"
+NGROK_DOWNLOAD_URL = "https://ngrok.com/download"
+NGROK_DOWNLOAD_MIN_BYTES = 5 * 1024 * 1024
+NGROK_DOWNLOAD_TIMEOUT_SEC = 45
+NGROK_DOWNLOAD_SPEED_LIMIT_BYTES = 2048
+NGROK_DOWNLOAD_SPEED_TIME_SEC = 12
 NGROK_DIRECT_DOWNLOADS = {
     "x86_64": "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-amd64.zip",
     "amd64": "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-amd64.zip",
@@ -206,26 +211,60 @@ def internet_available() -> bool:
     return False
 
 
-def download_file(url: str, target: Path, timeout: int = 120) -> None:
+def download_file(url: str, target: Path, timeout: int = NGROK_DOWNLOAD_TIMEOUT_SEC) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_suffix(target.suffix + ".partial")
+    partial.unlink(missing_ok=True)
     curl_bin = shutil.which("curl") or "/usr/bin/curl"
     if Path(curl_bin).exists() or shutil.which(curl_bin):
         try:
             result = subprocess.run(
-                [curl_bin, "-fL", "--connect-timeout", "15", "--max-time", str(timeout), "-o", str(target), url],
+                [
+                    curl_bin,
+                    "-fL",
+                    "--silent",
+                    "--show-error",
+                    "--connect-timeout",
+                    "10",
+                    "--max-time",
+                    str(timeout),
+                    "--speed-limit",
+                    str(NGROK_DOWNLOAD_SPEED_LIMIT_BYTES),
+                    "--speed-time",
+                    str(NGROK_DOWNLOAD_SPEED_TIME_SEC),
+                    "-o",
+                    str(partial),
+                    url,
+                ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 timeout=timeout + 20,
             )
         except Exception as exc:
+            partial.unlink(missing_ok=True)
             raise StepFailed(f"curl не смог скачать файл: {exc}") from exc
-        if result.returncode == 0:
+        if result.returncode == 0 and partial.exists():
+            partial.replace(target)
             return
+        partial.unlink(missing_ok=True)
         raise StepFailed((result.stdout or f"curl завершился с кодом {result.returncode}").strip())
 
     request = urllib.request.Request(url, headers={"User-Agent": "Second Lane Installer"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        target.write_bytes(response.read())
+    deadline = time.monotonic() + timeout
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response, partial.open("wb") as handle:
+            while True:
+                chunk = response.read(1024 * 256)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                if time.monotonic() > deadline:
+                    raise TimeoutError("скачивание слишком долго не заканчивается")
+        partial.replace(target)
+    except Exception:
+        partial.unlink(missing_ok=True)
+        raise
 
 
 @dataclass(frozen=True)
@@ -318,6 +357,7 @@ class InstallerApp:
 
         self.ngrok_token_var = tk.StringVar(value="")
         self.ngrok_domain_var = tk.StringVar(value="")
+        self.ngrok_path_var = tk.StringVar(value="")
         self.workspace_root_var = tk.StringVar(value="")
 
         self.state = self._load_state()
@@ -330,6 +370,8 @@ class InstallerApp:
 
         if self.state.get("inputs", {}).get("ngrok_domain"):
             self.ngrok_domain_var.set(self.state["inputs"]["ngrok_domain"])
+        if self.state.get("inputs", {}).get("ngrok_path"):
+            self.ngrok_path_var.set(self.state["inputs"]["ngrok_path"])
         if self.state.get("inputs", {}).get("workspace_root"):
             self.workspace_root_var.set(self.state["inputs"]["workspace_root"])
         if not self.workspace_root_var.get().strip():
@@ -468,6 +510,13 @@ class InstallerApp:
         self._bind_entry_shortcuts(self.ngrok_domain_entry)
         ttk.Button(self.ngrok_domain_row, text="Вставить", style="Action.TButton", command=self._paste_ngrok_domain_from_clipboard).pack(side=LEFT, padx=(8, 0))
 
+        self.ngrok_path_row = tk.Frame(self.input_frame, bg=PALETTE["app_bg"])
+        tk.Label(self.ngrok_path_row, text="Файл ngrok:", bg=PALETTE["app_bg"], fg=PALETTE["text"], font=self.body_font).pack(side=LEFT, padx=(0, 8))
+        self.ngrok_path_entry = ttk.Entry(self.ngrok_path_row, textvariable=self.ngrok_path_var, width=52, style="Input.TEntry")
+        self.ngrok_path_entry.pack(side=LEFT, fill=X, expand=True)
+        self._bind_entry_shortcuts(self.ngrok_path_entry)
+        ttk.Button(self.ngrok_path_row, text="Выбрать ngrok", style="Action.TButton", command=self._choose_ngrok_binary).pack(side=LEFT, padx=(8, 0))
+
         self.workspace_row = tk.Frame(self.input_frame, bg=PALETTE["app_bg"])
         tk.Label(self.workspace_row, text="Рабочая папка:", bg=PALETTE["app_bg"], fg=PALETTE["text"], font=self.body_font).pack(side=LEFT, padx=(0, 8))
         self.workspace_entry = ttk.Entry(self.workspace_row, textvariable=self.workspace_root_var, width=52, style="Input.TEntry")
@@ -555,7 +604,7 @@ class InstallerApp:
         default = {
             "current_step_index": 0,
             "step_status": {step.key: "pending" for step in STEP_SPECS},
-            "inputs": {"ngrok_domain": "", "workspace_root": ""},
+            "inputs": {"ngrok_domain": "", "ngrok_path": "", "workspace_root": ""},
         }
         if not STATE_FILE.exists():
             return default
@@ -567,6 +616,7 @@ class InstallerApp:
         state["current_step_index"] = int(parsed.get("current_step_index", 0))
         state["inputs"] = {
             "ngrok_domain": str(parsed.get("inputs", {}).get("ngrok_domain", "")),
+            "ngrok_path": str(parsed.get("inputs", {}).get("ngrok_path", "")),
             "workspace_root": str(parsed.get("inputs", {}).get("workspace_root", "")),
         }
         loaded_status = parsed.get("step_status", {})
@@ -580,6 +630,7 @@ class InstallerApp:
             "step_status": self.step_status,
             "inputs": {
                 "ngrok_domain": self.ngrok_domain_var.get().strip(),
+                "ngrok_path": self.ngrok_path_var.get().strip(),
                 "workspace_root": self.workspace_root_var.get().strip(),
             },
         }
@@ -617,12 +668,22 @@ class InstallerApp:
         show_hint = False
         hint_text = ""
         show_token = False
+        show_ngrok_path = False
         show_domain = False
         show_workspace = False
 
         if status == "action":
             show_hint = True
-            if step.key == "ngrok_auth":
+            if step.key == "ngrok":
+                hint_text = (
+                    "Автоматическое скачивание ngrok не прошло достаточно быстро.\n"
+                    "Самый простой запасной путь: нажми «Открыть скачивание ngrok», скачай macOS-версию с сайта ngrok, распакуй zip и выбери файл `ngrok` ниже.\n"
+                    "Если скачивание в браузере тоже не идёт, проблема не в Second Lane, а в доступе до сервера скачивания ngrok из этой сети."
+                )
+                show_ngrok_path = True
+                self.primary_button_text.set("Использовать выбранный ngrok")
+                self.secondary_button_text.set("Открыть скачивание ngrok")
+            elif step.key == "ngrok_auth":
                 if self._has_ngrok_auth():
                     hint_text = (
                         "На этом Mac уже есть сохранённый ключ ngrok.\n"
@@ -677,6 +738,7 @@ class InstallerApp:
         self.action_hint.configure(text=hint_text)
         self._set_packed(self.action_hint_box, show_hint, fill=X, pady=(10, 8), before=self.input_frame)
         self._set_packed(self.ngrok_token_row, show_token, fill=X, pady=2)
+        self._set_packed(self.ngrok_path_row, show_ngrok_path, fill=X, pady=2)
         self._set_packed(self.ngrok_domain_row, show_domain, fill=X, pady=2)
         self._set_packed(self.workspace_row, show_workspace, fill=X, pady=(8, 2))
 
@@ -778,6 +840,18 @@ class InstallerApp:
         if chosen:
             self.workspace_root_var.set(str(Path(chosen).expanduser().resolve()))
 
+    def _choose_ngrok_binary(self) -> None:
+        initial = self.ngrok_path_var.get().strip()
+        initial_dir = str(Path(initial).expanduser().parent) if initial else str(Path.home() / "Downloads")
+        chosen = filedialog.askopenfilename(
+            title="Выбери файл ngrok",
+            initialdir=initial_dir if Path(initial_dir).exists() else str(Path.home() / "Downloads"),
+            filetypes=[("ngrok", "ngrok"), ("All files", "*")],
+        )
+        if chosen:
+            self.ngrok_path_var.set(str(Path(chosen).expanduser()))
+            self._save_state()
+
     def _log(self, text: str) -> None:
         self.log_text.insert(END, text)
         self.log_text.see(END)
@@ -814,6 +888,7 @@ class InstallerApp:
         self.step_status = {step.key: "pending" for step in STEP_SPECS}
         self.ngrok_token_var.set("")
         self.ngrok_domain_var.set("")
+        self.ngrok_path_var.set("")
         self.workspace_root_var.set(self._workspace_root_for_ui())
         self._save_state()
         self._refresh_step_panel()
@@ -824,6 +899,9 @@ class InstallerApp:
     def _on_secondary(self) -> None:
         step = STEP_SPECS[self.current_step_index]
         status = self.step_status.get(step.key, "pending")
+        if step.key == "ngrok" and status == "action":
+            subprocess.Popen(["open", NGROK_DOWNLOAD_URL])
+            return
         if step.key == "ngrok_auth" and status == "action":
             subprocess.Popen(["open", NGROK_AUTHTOKEN_URL])
             return
@@ -846,6 +924,17 @@ class InstallerApp:
             return
         step = STEP_SPECS[self.current_step_index]
         status = self.step_status.get(step.key, "pending")
+
+        if step.key == "ngrok" and status == "action":
+            ngrok_path = self.ngrok_path_var.get().strip()
+            if not ngrok_path:
+                messagebox.showwarning(
+                    "Нужен файл ngrok",
+                    "Скачай ngrok с сайта, распакуй zip и нажми «Выбрать ngrok», чтобы показать мастеру файл запуска.",
+                )
+                return
+            self._run_async(self._action_use_manual_ngrok, ngrok_path)
+            return
 
         if step.key == "ngrok_auth" and status == "action":
             token = normalize_ngrok_token(self.ngrok_token_var.get())
@@ -1007,6 +1096,20 @@ class InstallerApp:
                 self._emit("next_step", index=step_index)
         self._emit("busy", value=False)
 
+    def _action_use_manual_ngrok(self, ngrok_path: str) -> None:
+        try:
+            self._install_manual_ngrok(Path(ngrok_path).expanduser())
+            self._emit("hint", text=f"ngrok выбран вручную и сохранён внутри проекта: {LOCAL_NGROK_BIN}\n")
+            self._emit("step_status", key="ngrok", status="done", index=self.current_step_index)
+            next_index = min(self.current_step_index + 1, len(STEP_SPECS) - 1)
+            self._emit("next_step", index=next_index)
+            self._run_steps_until_blocked(next_index)
+            return
+        except Exception as exc:
+            self._emit("step_status", key="ngrok", status="action", index=self.current_step_index)
+            self._emit("hint", text=f"Не получилось использовать выбранный ngrok: {exc}\nВыбери именно распакованный файл `ngrok`, не zip-архив.\n")
+        self._emit("busy", value=False)
+
     def _action_save_ngrok_token(self, token: str) -> None:
         try:
             token = normalize_ngrok_token(token)
@@ -1110,6 +1213,56 @@ class InstallerApp:
             raise StepFailed("ngrok не найден после установки. Нажми «Проверить снова».")
         self._emit("hint", text=f"ngrok установлен. Он даст адрес для связи ChatGPT с Second Lane. Путь: {ngrok}\n")
 
+    def _ngrok_binary_is_usable(self, path: Path) -> tuple[bool, str]:
+        if not path.exists() or not path.is_file():
+            return False, "файл ngrok не найден"
+        try:
+            result = subprocess.run(
+                [str(path), "version"],
+                cwd=PROJECT_DIR,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=8,
+            )
+        except Exception as exc:
+            return False, f"не смог проверить ngrok: {exc}"
+        output = (result.stdout or "").strip()
+        if result.returncode != 0:
+            return False, output or f"ngrok version завершился с кодом {result.returncode}"
+        match = re.search(r"ngrok\s+version\s+(\d+)", output, flags=re.IGNORECASE)
+        if not match:
+            return False, f"не смог понять версию ngrok: {output or '(пустой вывод)'}"
+        if int(match.group(1)) < 3:
+            return False, f"нужен ngrok v3+, найдено: {output}"
+        return True, output
+
+    def _prepare_local_ngrok(self, source: Path) -> None:
+        install_dir = LOCAL_NGROK_BIN.parent
+        install_dir.mkdir(parents=True, exist_ok=True)
+        source = source.expanduser().resolve()
+        if not LOCAL_NGROK_BIN.exists() or source != LOCAL_NGROK_BIN.resolve():
+            shutil.copy2(source, LOCAL_NGROK_BIN)
+        LOCAL_NGROK_BIN.chmod(0o755)
+        xattr_bin = shutil.which("xattr")
+        if xattr_bin:
+            subprocess.run([xattr_bin, "-dr", "com.apple.quarantine", str(LOCAL_NGROK_BIN)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ok, detail = self._ngrok_binary_is_usable(LOCAL_NGROK_BIN)
+        if not ok:
+            raise StepFailed(detail)
+        self._emit("log", text=f"$ {LOCAL_NGROK_BIN} version\n{detail}\n")
+
+    def _install_manual_ngrok(self, source: Path) -> None:
+        if source.suffix.lower() == ".zip":
+            raise StepFailed("Это zip-архив. Сначала распакуй его и выбери файл `ngrok` внутри.")
+        if source.name != "ngrok":
+            raise StepFailed("Файл должен называться `ngrok`. Если видишь ngrok.zip, сначала распакуй архив.")
+        source.chmod(source.stat().st_mode | 0o755)
+        ok, detail = self._ngrok_binary_is_usable(source)
+        if not ok:
+            raise StepFailed(detail)
+        self._prepare_local_ngrok(source)
+
     def _install_ngrok_direct(self) -> None:
         machine = platform.machine().lower()
         url = NGROK_DIRECT_DOWNLOADS.get(machine)
@@ -1133,7 +1286,10 @@ class InstallerApp:
         for attempt in range(1, 4):
             try:
                 self._emit("log", text=f"\nСкачивание ngrok: попытка {attempt} из 3\n")
-                download_file(url, archive_path, timeout=120)
+                archive_path.unlink(missing_ok=True)
+                download_file(url, archive_path, timeout=NGROK_DOWNLOAD_TIMEOUT_SEC)
+                if archive_path.stat().st_size < NGROK_DOWNLOAD_MIN_BYTES:
+                    raise StepFailed("скачанный архив ngrok выглядит неполным")
                 with zipfile.ZipFile(archive_path) as archive:
                     member = next((name for name in archive.namelist() if Path(name).name == "ngrok"), "")
                     if not member:
@@ -1142,20 +1298,21 @@ class InstallerApp:
                 extracted_path = Path(extracted)
                 if extracted_path != LOCAL_NGROK_BIN:
                     shutil.move(str(extracted_path), str(LOCAL_NGROK_BIN))
-                LOCAL_NGROK_BIN.chmod(0o755)
+                self._prepare_local_ngrok(LOCAL_NGROK_BIN)
                 archive_path.unlink(missing_ok=True)
-                self._run_command([str(LOCAL_NGROK_BIN), "version"])
                 return
             except Exception as exc:
                 last_error = str(exc)
                 if attempt < 3:
-                    self._emit("hint", text="Скачивание ngrok оборвалось. Мастер попробует ещё раз.\n")
-                    time.sleep(3)
+                    self._emit("hint", text="Скачивание ngrok оборвалось или стало слишком медленным. Мастер быстро попробует ещё раз.\n")
+                    time.sleep(1)
                     continue
-        raise StepFailed(
-            "Не получилось скачать ngrok напрямую. "
-            "Если сайты открываются, нажми «Проверить снова». "
-            f"Техническая деталь: {last_error}"
+        subprocess.Popen(["open", NGROK_DOWNLOAD_URL])
+        raise StepActionRequired(
+            "Не получилось быстро скачать ngrok напрямую.\n"
+            "Я открыл официальную страницу ngrok. Скачай macOS-версию, распакуй zip, нажми «Выбрать ngrok» и покажи мастеру файл `ngrok`.\n"
+            f"Техническая деталь: {last_error}",
+            action_key="ngrok",
         )
 
     def _step_ngrok_auth(self) -> None:
@@ -1334,14 +1491,28 @@ class InstallerApp:
         return result.returncode == 0
 
     def _find_ngrok_bin(self) -> str | None:
-        if LOCAL_NGROK_BIN.exists():
-            return str(LOCAL_NGROK_BIN)
-        direct = shutil.which("ngrok")
-        if direct:
-            return direct
-        for candidate in ("/opt/homebrew/bin/ngrok", "/usr/local/bin/ngrok"):
-            if Path(candidate).exists():
-                return candidate
+        candidates = [
+            self.ngrok_path_var.get().strip(),
+            str(LOCAL_NGROK_BIN),
+            shutil.which("ngrok") or "",
+            "/opt/homebrew/bin/ngrok",
+            "/usr/local/bin/ngrok",
+        ]
+        seen: set[str] = set()
+        for raw in candidates:
+            if not raw:
+                continue
+            try:
+                candidate = Path(raw).expanduser()
+                key = str(candidate.resolve()) if candidate.exists() else str(candidate)
+            except Exception:
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            ok, _detail = self._ngrok_binary_is_usable(candidate)
+            if ok:
+                return str(candidate)
         return None
 
     def _detect_ngrok_config_files(self) -> list[Path]:

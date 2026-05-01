@@ -77,6 +77,7 @@ TUNNEL_HEALTH_TIMEOUT_SEC = 6
 TUNNEL_RESTART_COOLDOWN_SEC = 5
 TUNNEL_MONITOR_INTERVAL_MS = 10_000
 NGROK_BLOCKED_IP_ERROR = "ERR_NGROK_9040"
+NGROK_MIN_MAJOR_VERSION = 3
 PUBLIC_CHECK_INTERVAL_SEC = 25
 PUBLIC_CHECK_MAX_FAILURES = 2
 RECOVERY_BACKOFF_STEPS_SEC = [3, 10, 30]
@@ -359,6 +360,27 @@ class ControlPanel:
                 summary="ngrok отклонил токен или доступ аккаунта",
                 recoverable=False,
             )
+        if (
+            "authtoken" in lowered
+            and ("not configured" in lowered or "required" in lowered or "sign up" in lowered)
+        ):
+            return TunnelFailure(
+                code="auth_failed",
+                summary="ngrok не видит сохранённый authtoken",
+                recoverable=False,
+            )
+        if "unknown flag" in lowered or "flag provided but not defined" in lowered or "unknown shorthand flag" in lowered:
+            return TunnelFailure(
+                code="ngrok_cli_incompatible",
+                summary="найден старый или несовместимый ngrok",
+                recoverable=False,
+            )
+        if "already online" in lowered or "already in use" in lowered or "is already bound" in lowered:
+            return TunnelFailure(
+                code="domain_in_use",
+                summary="этот ngrok-домен уже занят другим запущенным туннелем",
+                recoverable=False,
+            )
         if "reserved domain" in lowered or "domain" in lowered and ("invalid" in lowered or "not found" in lowered):
             return TunnelFailure(
                 code="domain_invalid",
@@ -378,9 +400,9 @@ class ControlPanel:
                 recoverable=True,
             )
         return TunnelFailure(
-            code="process_crashed",
+            code="startup_crashed",
             summary="ngrok завершился до готовности туннеля",
-            recoverable=True,
+            recoverable=False,
         )
 
     def _describe_tunnel_failure(self, failure: TunnelFailure) -> str:
@@ -391,12 +413,18 @@ class ControlPanel:
             )
         if failure.code == "auth_failed":
             return "ngrok не принял токен или права аккаунта."
+        if failure.code == "ngrok_cli_incompatible":
+            return "найден старый или несовместимый ngrok. Запусти установщик и поставь свежий ngrok."
+        if failure.code == "domain_in_use":
+            return "этот ngrok-домен уже занят другим запущенным туннелем. Закрой старые окна Second Lane/ngrok или перезагрузи Mac."
         if failure.code == "domain_invalid":
             return "ngrok не смог использовать домен из .env."
         if failure.code == "port_busy":
             return "локальный порт 8787 занят другим процессом."
         if failure.code == "network_temporary":
             return "временный сетевой сбой при подключении к ngrok."
+        if failure.code == "startup_crashed":
+            return "ngrok завершился до готовности. Смотри строки выше: там должен быть ответ ngrok с настоящей причиной."
         return failure.summary
 
     def _preflight_tunnel_check(self) -> tuple[bool, str]:
@@ -425,9 +453,68 @@ class ControlPanel:
         return True, "OK"
 
     def ngrok_bin(self) -> str | None:
-        if LOCAL_NGROK_BIN.exists():
-            return str(LOCAL_NGROK_BIN)
-        return shutil.which("ngrok")
+        candidates = [str(LOCAL_NGROK_BIN), shutil.which("ngrok") or "", "/opt/homebrew/bin/ngrok", "/usr/local/bin/ngrok"]
+        seen: set[str] = set()
+        for raw in candidates:
+            if not raw:
+                continue
+            try:
+                candidate = Path(raw).expanduser()
+                key = str(candidate.resolve()) if candidate.exists() else str(candidate)
+            except Exception:
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            ok, detail = self._ngrok_version_supported(str(candidate))
+            if ok:
+                return str(candidate)
+            self.write_log(f"Пропускаю неподходящий ngrok: {candidate}\n{detail}\n")
+        return None
+
+    def _ngrok_version_supported(self, ngrok_bin: str) -> tuple[bool, str]:
+        candidate = Path(ngrok_bin)
+        if not candidate.exists() or not candidate.is_file():
+            return False, "файл ngrok не найден"
+        try:
+            result = subprocess.run(
+                [ngrok_bin, "version"],
+                cwd=PROJECT_DIR,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=8,
+            )
+        except Exception as exc:
+            return False, f"не смог проверить версию ngrok: {exc}"
+        output = (result.stdout or "").strip()
+        if result.returncode != 0:
+            return False, output or f"ngrok version завершился с кодом {result.returncode}"
+        match = re.search(r"ngrok\s+version\s+(\d+)", output, flags=re.IGNORECASE)
+        if not match:
+            return False, f"не смог понять версию ngrok: {output or '(пустой вывод)'}"
+        if int(match.group(1)) < NGROK_MIN_MAJOR_VERSION:
+            return False, f"нужен ngrok v3+, найдено: {output}"
+        return True, output
+
+    def _ngrok_domain_arg(self, ngrok_bin: str, domain: str) -> str:
+        try:
+            result = subprocess.run(
+                [ngrok_bin, "http", "--help"],
+                cwd=PROJECT_DIR,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=8,
+            )
+        except Exception:
+            return f"--url={domain}"
+        help_text = (result.stdout or "").lower()
+        if result.returncode == 0 and "--url" in help_text:
+            return f"--url={domain}"
+        if result.returncode == 0 and "--domain" in help_text:
+            return f"--domain={domain}"
+        return f"--url={domain}"
 
     # --- Python env ---
 
@@ -704,8 +791,10 @@ class ControlPanel:
             self.write_log("Не запускаю туннель: ngrok не найден. Запусти установщик Second Lane ещё раз.\n")
             return
 
+        domain_arg = self._ngrok_domain_arg(ngrok_bin, domain)
+        self.write_log(f"Команда ngrok использует параметр домена: {domain_arg.split('=', 1)[0]}\n")
         self.tunnel_proc = subprocess.Popen(
-            [ngrok_bin, "http", "8787", f"--url={domain}", "--log=stdout", "--log-format=logfmt"],
+            [ngrok_bin, "http", "8787", domain_arg, "--log=stdout", "--log-format=logfmt"],
             cwd=PROJECT_DIR,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -762,6 +851,9 @@ class ControlPanel:
             self.last_url = None
             self.tunnel_url.set("Туннель: ошибка запуска")
             self.write_log(f"Туннель не поднялся: {detail}\n")
+            recent_output = "".join(captured_lines[-12:]).strip()
+            if recent_output:
+                self.write_log("Что ответил ngrok перед выходом:\n" + recent_output + "\n")
             self._schedule_tunnel_recovery(self._last_tunnel_failure)
             return
         if tunnel_ready or self.last_url:
