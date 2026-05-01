@@ -6,6 +6,7 @@ import os
 import platform
 import queue
 import re
+import select
 import secrets
 import shutil
 import subprocess
@@ -58,6 +59,7 @@ NGROK_DOWNLOAD_MIN_BYTES = 5 * 1024 * 1024
 NGROK_DOWNLOAD_TIMEOUT_SEC = 45
 NGROK_DOWNLOAD_SPEED_LIMIT_BYTES = 2048
 NGROK_DOWNLOAD_SPEED_TIME_SEC = 12
+NGROK_SMOKE_TIMEOUT_SEC = 18
 NGROK_DIRECT_DOWNLOADS = {
     "x86_64": "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-amd64.zip",
     "amd64": "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-amd64.zip",
@@ -1160,12 +1162,14 @@ class InstallerApp:
                 raise StepFailed("Адрес ngrok выглядит неверно. Вставь домен вида my-name.ngrok-free.app без лишнего текста.")
             self._prepare_env_file()
             self._write_runtime_env_defaults()
-            self._upsert_env("NGROK_DOMAIN", domain)
             self._upsert_env("WORKSPACE_ROOTS", self._normalized_workspace_roots())
             token = self._read_env_value("AGENT_TOKEN")
             if not token_is_safe(token):
                 self._upsert_env("AGENT_TOKEN", self._generate_token())
-            self._emit("hint", text="Адрес ngrok сохранён в файл настроек Second Lane.\n")
+            self._emit("hint", text="Проверяю, что ngrok реально сможет поднять этот адрес с текущим аккаунтом.\n")
+            self._smoke_check_ngrok_domain(domain)
+            self._upsert_env("NGROK_DOMAIN", domain)
+            self._emit("hint", text="Адрес ngrok проверен и сохранён в файл настроек Second Lane.\n")
             self._emit("step_status", key="project_env", status="done", index=self.current_step_index)
             next_index = min(self.current_step_index + 1, len(STEP_SPECS) - 1)
             self._emit("next_step", index=next_index)
@@ -1257,10 +1261,9 @@ class InstallerApp:
             raise StepFailed("Это zip-архив. Сначала распакуй его и выбери файл `ngrok` внутри.")
         if source.name != "ngrok":
             raise StepFailed("Файл должен называться `ngrok`. Если видишь ngrok.zip, сначала распакуй архив.")
+        if not source.exists() or not source.is_file():
+            raise StepFailed("Выбранный файл ngrok не найден. Нажми «Выбрать ngrok» и покажи распакованный файл ещё раз.")
         source.chmod(source.stat().st_mode | 0o755)
-        ok, detail = self._ngrok_binary_is_usable(source)
-        if not ok:
-            raise StepFailed(detail)
         self._prepare_local_ngrok(source)
 
     def _install_ngrok_direct(self) -> None:
@@ -1348,15 +1351,16 @@ class InstallerApp:
                 "Нужен корректный адрес ngrok. Пример: my-name.ngrok-free.app.",
                 action_key="project_env",
             )
-        if normalized_domain != current_domain:
-            self._upsert_env("NGROK_DOMAIN", normalized_domain)
-
         token = self._read_env_value("AGENT_TOKEN")
         if not token_is_safe(token):
             self._upsert_env("AGENT_TOKEN", self._generate_token())
             self._emit("hint", text="Создал новый секретный ключ доступа для Second Lane. Он защищает панель от чужих запросов.\n")
 
         self._upsert_env("WORKSPACE_ROOTS", self._normalized_workspace_roots())
+        self._emit("hint", text="Проверяю, что ngrok реально сможет поднять сохранённый адрес.\n")
+        self._smoke_check_ngrok_domain(normalized_domain)
+        if normalized_domain != current_domain:
+            self._upsert_env("NGROK_DOMAIN", normalized_domain)
         self._emit("hint", text=f"Файл настроек готов. Техническое имя файла: {ENV_FILE}\n")
 
     def _step_python_env(self) -> None:
@@ -1540,6 +1544,110 @@ class InstallerApp:
         except StepFailed as exc:
             raise StepFailed(f"ngrok token найден, но конфиг не прошёл проверку. {exc}") from exc
 
+    def _ngrok_domain_arg(self, ngrok_bin: str, domain: str) -> str:
+        try:
+            result = subprocess.run(
+                [ngrok_bin, "http", "--help"],
+                cwd=PROJECT_DIR,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=5,
+            )
+        except Exception:
+            return f"--domain={domain}"
+        help_text = result.stdout or ""
+        if result.returncode == 0 and "--url" in help_text:
+            return f"--url={domain}"
+        return f"--domain={domain}"
+
+    def _smoke_check_ngrok_domain(self, domain: str) -> None:
+        ngrok_bin = self._find_ngrok_bin()
+        if not ngrok_bin:
+            raise StepFailed("Программа ngrok не найдена. Вернись к шагу установки ngrok и нажми «Продолжить».")
+        self._check_ngrok_config(ngrok_bin)
+        domain_arg = self._ngrok_domain_arg(ngrok_bin, domain)
+        argv = [ngrok_bin, "http", domain_arg, "8787", "--log=stdout"]
+        self._emit("command", text=" ".join(argv))
+        self._emit("log", text=f"$ {' '.join(argv)}\n")
+        proc = subprocess.Popen(
+            argv,
+            cwd=PROJECT_DIR,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=os.environ.copy(),
+        )
+        output_parts: list[str] = []
+        try:
+            deadline = time.monotonic() + NGROK_SMOKE_TIMEOUT_SEC
+            while time.monotonic() < deadline:
+                if proc.stdout is not None:
+                    readable, _, _ = select.select([proc.stdout], [], [], 0.2)
+                    if readable:
+                        line = proc.stdout.readline()
+                        if line:
+                            output_parts.append(line)
+                            self._emit("log", text=line)
+                            output = "".join(output_parts)
+                            problem = self._friendly_ngrok_smoke_error(output)
+                            if problem:
+                                raise StepFailed(problem)
+                            if self._ngrok_smoke_succeeded(output, domain):
+                                self._emit("hint", text="ngrok подтвердил домен. Туннель можно будет поднять в панели запуска.\n")
+                                return
+                if proc.poll() is not None:
+                    if proc.stdout is not None:
+                        rest = proc.stdout.read()
+                        if rest:
+                            output_parts.append(rest)
+                            self._emit("log", text=rest)
+                    output = "".join(output_parts)
+                    problem = self._friendly_ngrok_smoke_error(output)
+                    if problem:
+                        raise StepFailed(problem)
+                    raise StepFailed(f"ngrok завершился до подтверждения домена. Подробности: {self._short_ngrok_output(output)}")
+            output = "".join(output_parts)
+            if self._ngrok_smoke_succeeded(output, domain):
+                self._emit("hint", text="ngrok подтвердил домен. Туннель можно будет поднять в панели запуска.\n")
+                return
+            raise StepFailed(f"ngrok не успел подтвердить домен за {NGROK_SMOKE_TIMEOUT_SEC} секунд. Подробности: {self._short_ngrok_output(output)}")
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            time.sleep(1.0)
+
+    def _ngrok_smoke_succeeded(self, output: str, domain: str) -> bool:
+        lowered = output.lower()
+        return "started tunnel" in lowered or f"url=https://{domain.lower()}" in lowered or f"url=http://{domain.lower()}" in lowered
+
+    def _friendly_ngrok_smoke_error(self, output: str) -> str:
+        lowered = output.lower()
+        if not lowered:
+            return ""
+        if "authentication failed" in lowered or "invalid authtoken" in lowered or "authtoken" in lowered and "invalid" in lowered:
+            return "ngrok не принял ключ. Открой кабинет ngrok, скопируй Authtoken заново и вставь его в установщик."
+        if "already in use" in lowered or "already online" in lowered or "is already bound" in lowered:
+            return "Этот домен ngrok уже занят другим запущенным туннелем. Закрой старую панель Second Lane или останови старый ngrok и нажми «Проверить снова»."
+        if "not found" in lowered or "not reserved" in lowered or "does not exist" in lowered or "reserved domain" in lowered:
+            return "ngrok не нашёл этот домен в твоём аккаунте. Скопируй именно свой Dev Domain из dashboard.ngrok.com/domains."
+        if "permission" in lowered or "forbidden" in lowered or "not authorized" in lowered:
+            return "Текущий аккаунт ngrok не имеет права запускать этот домен. Проверь, что Authtoken и домен взяты из одного аккаунта."
+        if "unknown flag" in lowered or "unknown shorthand flag" in lowered:
+            return "Установленный ngrok слишком старый или несовместимый. Вернись к шагу ngrok и дай мастеру установить свежую версию."
+        return ""
+
+    def _short_ngrok_output(self, output: str) -> str:
+        cleaned = " ".join((output or "").split())
+        if not cleaned:
+            return "ngrok не вывел понятной причины"
+        return cleaned[-900:]
+
     def _prepare_env_file(self) -> None:
         if ENV_FILE.exists():
             return
@@ -1627,7 +1735,7 @@ class InstallerApp:
             return False
         if not DOMAIN_HOSTNAME_REGEX.match(cleaned):
             return False
-        return cleaned.endswith(NGROK_MANAGED_SUFFIXES) or "." in cleaned
+        return cleaned.endswith(NGROK_MANAGED_SUFFIXES)
 
     def _launch_control_panel(self) -> None:
         vpy = VENV_DIR / "bin" / "python"

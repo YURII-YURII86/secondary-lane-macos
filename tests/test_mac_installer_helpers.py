@@ -81,6 +81,79 @@ def test_manual_ngrok_rejects_zip(tmp_path: Path) -> None:
         app._install_manual_ngrok(archive)
 
 
+def test_manual_ngrok_is_copied_before_validation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    app = installer.InstallerApp.__new__(installer.InstallerApp)
+    app._emit = lambda *_args, **_kwargs: None
+    source = tmp_path / "Downloads" / "ngrok"
+    source.parent.mkdir()
+    source.write_text("ngrok-binary", "utf-8")
+    local_ngrok = tmp_path / "tools" / "ngrok" / "ngrok"
+    validated_paths: list[Path] = []
+
+    def fake_validate(path: Path) -> tuple[bool, str]:
+        validated_paths.append(path)
+        return path == local_ngrok, "ngrok version 3.20.0"
+
+    monkeypatch.setattr(installer, "LOCAL_NGROK_BIN", local_ngrok)
+    monkeypatch.setattr(installer.shutil, "which", lambda _name: "")
+    monkeypatch.setattr(app, "_ngrok_binary_is_usable", fake_validate)
+
+    app._install_manual_ngrok(source)
+
+    assert local_ngrok.read_text("utf-8") == "ngrok-binary"
+    assert validated_paths == [local_ngrok]
+
+
+def test_valid_ngrok_domain_rejects_placeholders_and_random_domains() -> None:
+    app = installer.InstallerApp.__new__(installer.InstallerApp)
+
+    assert app._valid_ngrok_domain("team.ngrok-free.app")
+    assert app._valid_ngrok_domain("team.ngrok.dev")
+    assert not app._valid_ngrok_domain("your-domain.ngrok-free.app")
+    assert not app._valid_ngrok_domain("example.com")
+
+
+def test_ngrok_smoke_check_accepts_started_tunnel(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = installer.InstallerApp.__new__(installer.InstallerApp)
+    app._emit = lambda *_args, **_kwargs: None
+    app._find_ngrok_bin = lambda: "/tmp/ngrok"
+    app._check_ngrok_config = lambda _ngrok_bin: None
+    app._ngrok_domain_arg = lambda _ngrok_bin, domain: f"--url={domain}"
+
+    class FakeStdout:
+        def __init__(self) -> None:
+            self.lines = ['lvl=info msg="started tunnel" url=https://team.ngrok-free.app\n']
+
+        def readline(self) -> str:
+            return self.lines.pop(0) if self.lines else ""
+
+        def read(self) -> str:
+            return ""
+
+    class FakeProc:
+        def __init__(self) -> None:
+            self.stdout = FakeStdout()
+            self.terminated = False
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def wait(self, timeout: int | None = None) -> int:
+            return 0
+
+    fake_proc = FakeProc()
+    monkeypatch.setattr(installer.subprocess, "Popen", lambda *_args, **_kwargs: fake_proc)
+    monkeypatch.setattr(installer.select, "select", lambda readers, *_args, **_kwargs: (readers, [], []))
+    monkeypatch.setattr(installer.time, "sleep", lambda _seconds: None)
+
+    app._smoke_check_ngrok_domain("team.ngrok-free.app")
+
+    assert fake_proc.terminated
+
+
 def test_control_panel_does_not_recover_unknown_ngrok_startup_crash() -> None:
     import gpts_agent_control as control
 
@@ -89,6 +162,14 @@ def test_control_panel_does_not_recover_unknown_ngrok_startup_crash() -> None:
 
     assert failure.code == "startup_crashed"
     assert not failure.recoverable
+
+
+def test_control_panel_rejects_placeholder_or_random_ngrok_domain() -> None:
+    import gpts_agent_control as control
+
+    assert control.ngrok_domain_is_valid("demo.ngrok-free.app")
+    assert not control.ngrok_domain_is_valid("your-domain.ngrok-free.app")
+    assert not control.ngrok_domain_is_valid("example.com")
 
 
 def test_control_panel_uses_domain_flag_for_older_ngrok_help(monkeypatch: pytest.MonkeyPatch) -> None:

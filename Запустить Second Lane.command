@@ -59,6 +59,84 @@ MSG
   exit 1
 fi
 
+env_value() {
+  local KEY="$1"
+  if [[ ! -f ".env" ]]; then
+    return 1
+  fi
+  awk -F= -v key="$KEY" '
+    $0 !~ /^[[:space:]]*#/ && $1 == key {
+      sub(/^[^=]*=/, "", $0)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+      print $0
+      exit
+    }
+  ' ".env"
+}
+
+token_ready() {
+  local TOKEN="$1"
+  [[ "$TOKEN" =~ '^[0-9a-fA-F]{64}$' ]] || return 1
+  local UNIQUE_COUNT
+  UNIQUE_COUNT="$(printf "%s" "$TOKEN" | fold -w 1 | sort -u | wc -l | tr -d ' ')"
+  [[ "${UNIQUE_COUNT:-0}" -gt 4 ]]
+}
+
+domain_ready() {
+  local DOMAIN="$1"
+  DOMAIN="${DOMAIN#http://}"
+  DOMAIN="${DOMAIN#https://}"
+  DOMAIN="${DOMAIN%%/*}"
+  DOMAIN="${DOMAIN%.}"
+  DOMAIN="${DOMAIN:l}"
+  [[ -n "$DOMAIN" ]] || return 1
+  case "$DOMAIN" in
+    your-domain.ngrok-free.app|your-domain.ngrok-free.dev|example.ngrok-free.app|example.ngrok-free.dev|something.ngrok-free.app|something.ngrok-free.dev)
+      return 1
+      ;;
+  esac
+  [[ "$DOMAIN" =~ '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$' ]] || return 1
+  [[ "$DOMAIN" == *.ngrok-free.app || "$DOMAIN" == *.ngrok-free.dev || "$DOMAIN" == *.ngrok-free.pizza || "$DOMAIN" == *.ngrok.app || "$DOMAIN" == *.ngrok.dev || "$DOMAIN" == *.ngrok.pizza ]]
+}
+
+ngrok_ready() {
+  [[ -x "tools/ngrok/ngrok" ]] || command -v ngrok >/dev/null 2>&1
+}
+
+open_installer_for_repair() {
+  local REASON="$1"
+  cat <<MSG
+
+Настройка Second Lane ещё не готова.
+
+Причина:
+• $REASON
+
+Сейчас открою пошаговый установщик. Он сам поправит настройки, ничего вручную в Terminal вводить не нужно.
+
+MSG
+  exec "$PICK" second_lane_installer.py
+}
+
+if [[ ! -f ".env" ]]; then
+  open_installer_for_repair "не найден файл .env с настройками"
+fi
+
+AGENT_TOKEN_VALUE="$(env_value "AGENT_TOKEN" || true)"
+NGROK_DOMAIN_VALUE="$(env_value "NGROK_DOMAIN" || true)"
+
+if ! token_ready "$AGENT_TOKEN_VALUE"; then
+  open_installer_for_repair "секретный ключ AGENT_TOKEN пустой, шаблонный или слишком слабый"
+fi
+
+if ! domain_ready "$NGROK_DOMAIN_VALUE"; then
+  open_installer_for_repair "адрес NGROK_DOMAIN пустой, шаблонный или не похож на домен ngrok"
+fi
+
+if ! ngrok_ready; then
+  open_installer_for_repair "ngrok ещё не установлен в проекте и не найден в системе"
+fi
+
 echo "Запускаю Second Lane через $PICK"
 "$PICK" gpts_agent_control.py
 rc=$?

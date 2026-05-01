@@ -71,6 +71,25 @@ LOCAL_URL = "http://127.0.0.1:8787"
 
 # --- Tunnel defaults ---
 DEFAULT_NGROK_DOMAIN = ""
+DOMAIN_HOSTNAME_REGEX = re.compile(
+    r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
+)
+NGROK_MANAGED_SUFFIXES = (
+    ".ngrok-free.app",
+    ".ngrok-free.dev",
+    ".ngrok-free.pizza",
+    ".ngrok.app",
+    ".ngrok.dev",
+    ".ngrok.pizza",
+)
+PLACEHOLDER_NGROK_DOMAINS = {
+    "your-domain.ngrok-free.dev",
+    "your-domain.ngrok-free.app",
+    "example.ngrok-free.dev",
+    "example.ngrok-free.app",
+    "something.ngrok-free.dev",
+    "something.ngrok-free.app",
+}
 TUNNEL_HEALTH_ATTEMPTS = 4
 TUNNEL_HEALTH_DELAY_SEC = 2.0
 TUNNEL_HEALTH_TIMEOUT_SEC = 6
@@ -135,6 +154,17 @@ def normalize_ngrok_domain(raw: str) -> str:
         cleaned = first_token
     cleaned = cleaned.removeprefix("https://").removeprefix("http://")
     return cleaned.split("/", 1)[0].strip().strip(".").lower()
+
+
+def ngrok_domain_is_valid(domain: str) -> bool:
+    cleaned = normalize_ngrok_domain(domain)
+    if not cleaned or cleaned in PLACEHOLDER_NGROK_DOMAINS:
+        return False
+    if cleaned.startswith("*."):
+        return False
+    if not DOMAIN_HOSTNAME_REGEX.match(cleaned):
+        return False
+    return cleaned.endswith(NGROK_MANAGED_SUFFIXES)
 
 
 @dataclass
@@ -434,6 +464,8 @@ class ControlPanel:
         domain = self.ngrok_domain().strip()
         if not domain:
             return False, "в .env не задан NGROK_DOMAIN"
+        if not ngrok_domain_is_valid(domain):
+            return False, "в .env указан не настоящий ngrok-домен. Запусти установщик Second Lane и вставь Dev Domain из кабинета ngrok."
         try:
             result = subprocess.run(
                 [ngrok_bin, "config", "check"],
